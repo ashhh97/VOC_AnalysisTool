@@ -8,11 +8,12 @@ import os
 
 # 尝试导入配置文件
 try:
-    from config import HF_API_TOKEN, TONGYI_API_KEY, API_PRIORITY
+    from config import HF_API_TOKEN, TONGYI_API_KEY, TONGYI_MODEL, API_PRIORITY
 except ImportError:
     # 如果配置文件不存在，使用默认值
     HF_API_TOKEN = None
     TONGYI_API_KEY = None
+    TONGYI_MODEL = "qwen-turbo"
     API_PRIORITY = ["hf_token", "tongyi", "hf_free", "local"]
 
 class VOCAnalyzer:
@@ -20,6 +21,8 @@ class VOCAnalyzer:
         # 加载API配置
         self.hf_token = HF_API_TOKEN or os.getenv('HF_API_TOKEN')
         self.tongyi_key = TONGYI_API_KEY or os.getenv('TONGYI_API_KEY')
+        # 获取模型名称，如果未配置则使用默认值
+        self.tongyi_model = TONGYI_MODEL if 'TONGYI_MODEL' in globals() else (os.getenv('TONGYI_MODEL') or "qwen-turbo")
         self.api_priority = API_PRIORITY
         
         # Hugging Face API端点（使用Token）
@@ -49,7 +52,7 @@ class VOCAnalyzer:
         if self.hf_token:
             print(f"[VOC Analyzer] Hugging Face Token已配置")
         if self.tongyi_key:
-            print(f"[VOC Analyzer] 通义千问API Key已配置")
+            print(f"[VOC Analyzer] 通义千问API Key已配置，模型: {self.tongyi_model}")
         print(f"[VOC Analyzer] API优先级: {', '.join(self.api_priority)}")
     
     def set_stop_flag(self, stop_flag):
@@ -145,7 +148,7 @@ class VOCAnalyzer:
                 "Authorization": f"Bearer {self.tongyi_key}"
             }
             payload = {
-                "model": "qwen-turbo",  # 或 "qwen-plus", "qwen-max"
+                "model": self.tongyi_model,  # 使用配置的模型
                 "input": {
                     "messages": [
                         {
@@ -160,24 +163,68 @@ class VOCAnalyzer:
                 }
             }
             
-            print(f"[通义千问API] 尝试调用...")
+            print(f"[通义千问API] 尝试调用模型: {self.tongyi_model}")
             response = requests.post(self.tongyi_api_url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 result = response.json()
-                if result.get('output') and result['output'].get('choices'):
-                    generated_text = result['output']['choices'][0]['message']['content']
-                    print(f"[通义千问API] 调用成功")
+                print(f"[通义千问API] 响应状态: 200")
+                
+                # 通义千问API的响应格式可能是两种：
+                # 1. 新格式: result['output']['text'] 直接包含文本
+                # 2. 旧格式: result['output']['choices'][0]['message']['content']
+                generated_text = None
+                
+                if result.get('output'):
+                    output = result['output']
+                    # 尝试新格式（text字段）
+                    if 'text' in output:
+                        generated_text = output['text']
+                        print(f"[通义千问API] 使用text字段获取结果")
+                    # 尝试旧格式（choices字段）
+                    elif 'choices' in output and len(output['choices']) > 0:
+                        generated_text = output['choices'][0]['message']['content']
+                        print(f"[通义千问API] 使用choices字段获取结果")
+                
+                if generated_text:
+                    print(f"[通义千问API] 调用成功，返回文本长度: {len(generated_text)}")
                     # 解析结果
                     return self.parse_ai_result({'generated_text': generated_text}, text)
                 else:
-                    print(f"[通义千问API] 响应格式异常: {result}")
+                    print(f"[通义千问API] 响应格式异常，未找到text或choices: {result}")
                     return None
+            elif response.status_code == 429:
+                # 速率限制，等待后重试
+                error_info = response.json() if response.content else {}
+                wait_time = 2  # 默认等待2秒
+                print(f"[通义千问API] 速率限制(429)，等待{wait_time}秒后重试...")
+                import time
+                time.sleep(wait_time)
+                # 重试一次
+                retry_response = requests.post(self.tongyi_api_url, headers=headers, json=payload, timeout=30)
+                if retry_response.status_code == 200:
+                    result = retry_response.json()
+                    if result.get('output'):
+                        output = result['output']
+                        if 'text' in output:
+                            generated_text = output['text']
+                        elif 'choices' in output and len(output['choices']) > 0:
+                            generated_text = output['choices'][0]['message']['content']
+                        else:
+                            generated_text = None
+                        
+                        if generated_text:
+                            print(f"[通义千问API] 重试成功")
+                            return self.parse_ai_result({'generated_text': generated_text}, text)
+                print(f"[通义千问API] 重试后仍失败，返回None以尝试下一个API")
+                return None
             else:
                 print(f"[通义千问API] 错误 {response.status_code}: {response.text[:200]}")
                 return None
         except Exception as e:
             print(f"[通义千问API] 调用失败: {e}")
+            import traceback
+            print(f"[通义千问API] 错误详情: {traceback.format_exc()}")
             return None
     
     def _try_huggingface_free(self, prompt, text):
@@ -406,7 +453,14 @@ class VOCAnalyzer:
                 if progress_callback:
                     progress_callback(idx, total_rows, f'正在分析第 {idx}/{total_rows} 条反馈...')
                 
+                # 调用AI分析
                 analysis = self.analyze_with_ai(row_info['feedback'])
+                
+                # 在API调用之间添加小延迟，避免触发速率限制
+                # 通义千问API有速率限制，每次调用后等待0.3秒
+                if self.tongyi_key and idx < total_rows:  # 最后一条不需要等待
+                    import time
+                    time.sleep(0.3)
                 
                 # 再次检查停止标志
                 if self.stop_flag and self.stop_flag.is_set():
@@ -437,6 +491,13 @@ class VOCAnalyzer:
                 headers, categorized_data, new_sheet_name, len(sheets_data)
             )
             sheets_data.append(analyzed_sheet_data)
+            
+            # 创建分类统计sheet
+            summary_sheet_name = f"{sheet_name}_分类统计"
+            summary_sheet_data = self.create_category_summary_sheet(
+                categorized_data, summary_sheet_name, len(sheets_data), total_rows
+            )
+            sheets_data.append(summary_sheet_data)
         
         return sheets_data
     
@@ -602,6 +663,165 @@ class VOCAnalyzer:
             'showGridLines': 1,
             'dataVerification': {},
             'merge': merge_cells if merge_cells else {}
+        }
+    
+    def create_category_summary_sheet(self, categorized_data, sheet_name, index, total_rows):
+        """创建VOC分类统计sheet"""
+        cells = []
+        current_row = 0
+        
+        # 表头
+        headers = ['分类', '情感', '数量', '占比']
+        for col_idx, header in enumerate(headers):
+            cells.append({
+                'r': current_row,
+                'c': col_idx,
+                'v': {
+                    'v': header,
+                    'm': header,
+                    'ct': {'fa': 'General', 't': 'g'}
+                }
+            })
+        current_row += 1
+        
+        # 统计每个分类的数据
+        summary_stats = {}
+        for key, category_info in categorized_data.items():
+            category = category_info['category']
+            sentiment = category_info['sentiment']
+            count = len(category_info['rows'])
+            
+            # 按分类和情感统计
+            if category not in summary_stats:
+                summary_stats[category] = {}
+            if sentiment not in summary_stats[category]:
+                summary_stats[category][sentiment] = 0
+            summary_stats[category][sentiment] += count
+        
+        # 按分类名称排序
+        for category in sorted(summary_stats.keys()):
+            for sentiment in sorted(summary_stats[category].keys()):
+                count = summary_stats[category][sentiment]
+                percentage = (count / total_rows * 100) if total_rows > 0 else 0
+                
+                # 分类
+                cells.append({
+                    'r': current_row,
+                    'c': 0,
+                    'v': {
+                        'v': category,
+                        'm': category,
+                        'ct': {'fa': 'General', 't': 'g'}
+                    }
+                })
+                
+                # 情感
+                cells.append({
+                    'r': current_row,
+                    'c': 1,
+                    'v': {
+                        'v': sentiment,
+                        'm': sentiment,
+                        'ct': {'fa': 'General', 't': 'g'}
+                    }
+                })
+                
+                # 数量
+                cells.append({
+                    'r': current_row,
+                    'c': 2,
+                    'v': {
+                        'v': count,
+                        'm': str(count),
+                        'ct': {'fa': 'General', 't': 'n'}
+                    }
+                })
+                
+                # 占比（百分比）
+                cells.append({
+                    'r': current_row,
+                    'c': 3,
+                    'v': {
+                        'v': percentage,
+                        'm': f'{percentage:.2f}%',
+                        'ct': {'fa': '0.00%', 't': 'n'}
+                    }
+                })
+                
+                current_row += 1
+        
+        # 添加总计行
+        total_count = sum(len(info['rows']) for info in categorized_data.values())
+        cells.append({
+            'r': current_row,
+            'c': 0,
+            'v': {
+                'v': '总计',
+                'm': '总计',
+                'ct': {'fa': 'General', 't': 'g'}
+            }
+        })
+        cells.append({
+            'r': current_row,
+            'c': 1,
+            'v': {
+                'v': '-',
+                'm': '-',
+                'ct': {'fa': 'General', 't': 'g'}
+            }
+        })
+        cells.append({
+            'r': current_row,
+            'c': 2,
+            'v': {
+                'v': total_count,
+                'm': str(total_count),
+                'ct': {'fa': 'General', 't': 'n'}
+            }
+        })
+        cells.append({
+            'r': current_row,
+            'c': 3,
+            'v': {
+                'v': 100.0,
+                'm': '100.00%',
+                'ct': {'fa': '0.00%', 't': 'n'}
+            }
+        })
+        
+        # 设置列宽
+        column = [
+            {'wch': 120},  # 分类
+            {'wch': 80},   # 情感
+            {'wch': 80},   # 数量
+            {'wch': 100}   # 占比
+        ]
+        
+        return {
+            'name': sheet_name,
+            'index': index,
+            'order': index,
+            'status': 1,
+            'celldata': cells,
+            'config': {
+                'columnlen': column,
+                'rowlen': {}
+            },
+            'scrollLeft': 0,
+            'scrollTop': 0,
+            'luckysheet_select_save': [],
+            'calc chain': [],
+            'isPivotTable': False,
+            'pivotTable': {},
+            'filter_select': None,
+            'filter': None,
+            'luckysheet_conditionformat_save': [],
+            'frozen': {},
+            'chart': [],
+            'zoomRatio': 1,
+            'image': [],
+            'showGridLines': 1,
+            'dataVerification': {}
         }
     
 

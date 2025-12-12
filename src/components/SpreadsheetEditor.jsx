@@ -8,6 +8,39 @@ function SpreadsheetEditor({ data }) {
   const containerRef = useRef(null)
   const spreadsheetRef = useRef(null)
 
+  // 转换单个sheet的数据格式
+  const convertSheetData = (sheet) => {
+    const rows = {}
+    
+    if (sheet.celldata && Array.isArray(sheet.celldata)) {
+      sheet.celldata.forEach(cell => {
+        const row = cell.r
+        const col = cell.c
+        const value = cell.v?.v || cell.v?.m || ''
+        
+        if (!rows[row]) {
+          rows[row] = { cells: {} }
+        }
+        
+        rows[row].cells[col] = {
+          text: String(value)
+        }
+      })
+    }
+    
+    return { 
+      name: sheet.name || 'Sheet1',
+      rows 
+    }
+  }
+
+  // 转换所有sheet数据为x-data-spreadsheet需要的格式
+  const convertAllSheetsData = (sheets) => {
+    return {
+      sheets: sheets.map(sheet => convertSheetData(sheet))
+    }
+  }
+
   useEffect(() => {
     console.log('[SpreadsheetEditor] 收到数据:', data)
     
@@ -38,62 +71,36 @@ function SpreadsheetEditor({ data }) {
       console.log('[SpreadsheetEditor] 开始创建x-data-spreadsheet实例...')
       console.log('[SpreadsheetEditor] sheets数量:', data.sheets.length)
       
-      // 创建Spreadsheet实例
+      // 创建单个Spreadsheet实例
       const spreadsheet = new Spreadsheet(containerRef.current, {
-        mode: 'edit', // 编辑模式
+        mode: 'edit',
         showToolbar: true,
         showGrid: true,
         showContextmenu: true,
         view: {
-          height: () => containerRef.current.clientHeight,
-          width: () => containerRef.current.clientWidth,
+          height: () => {
+            const container = containerRef.current
+            if (!container) return 500
+            return container.clientHeight
+          },
+          width: () => {
+            const container = containerRef.current
+            return container ? container.clientWidth : 800
+          },
         },
       })
 
       spreadsheetRef.current = spreadsheet
 
-      // 转换数据格式
-      // x-data-spreadsheet需要的数据格式：{ rows: { 0: { cells: { 0: { text: 'value' } } } } }
-      const convertSheetData = (sheet) => {
-        const rows = {}
-        
-        if (sheet.celldata && Array.isArray(sheet.celldata)) {
-          sheet.celldata.forEach(cell => {
-            const row = cell.r
-            const col = cell.c
-            const value = cell.v?.v || cell.v?.m || ''
-            
-            if (!rows[row]) {
-              rows[row] = { cells: {} }
-            }
-            
-            rows[row].cells[col] = {
-              text: String(value)
-            }
-          })
-        }
-        
-        return { rows }
-      }
-
-      // 加载第一个sheet的数据
-      if (data.sheets.length > 0) {
-        const firstSheet = data.sheets[0]
-        console.log('[SpreadsheetEditor] 加载第一个sheet:', firstSheet.name)
-        console.log('[SpreadsheetEditor] celldata数量:', firstSheet.celldata?.length || 0)
-        
-        const convertedData = convertSheetData(firstSheet)
-        console.log('[SpreadsheetEditor] 转换后的数据行数:', Object.keys(convertedData.rows).length)
-        
-        spreadsheet.loadData(convertedData)
-        console.log('[SpreadsheetEditor] ✓ 数据加载成功！')
-      }
-
-      // 如果有多个sheet，可以添加sheet切换功能
-      if (data.sheets.length > 1) {
-        console.log('[SpreadsheetEditor] 检测到多个sheet，当前只显示第一个')
-        // x-data-spreadsheet本身不支持多sheet，但可以后续扩展
-      }
+      // 转换所有sheet数据
+      const allSheetsData = convertAllSheetsData(data.sheets)
+      console.log('[SpreadsheetEditor] 转换后的数据:', allSheetsData)
+      console.log('[SpreadsheetEditor] sheet名称列表:', allSheetsData.sheets.map(s => s.name))
+      
+      // 一次性加载所有sheet，它们会自动显示在表格内部的tab栏
+      spreadsheet.loadData(allSheetsData)
+      console.log('[SpreadsheetEditor] ✓ 所有sheet加载成功！')
+      console.log('[SpreadsheetEditor] sheet数量:', allSheetsData.sheets.length)
 
     } catch (error) {
       console.error('[SpreadsheetEditor] 初始化失败:', error)
@@ -111,6 +118,10 @@ function SpreadsheetEditor({ data }) {
       }
     }
   }, [data])
+
+  if (!data || !data.sheets || data.sheets.length === 0) {
+    return <div className="spreadsheet-container">暂无数据</div>
+  }
 
   return (
     <div className="spreadsheet-container">
