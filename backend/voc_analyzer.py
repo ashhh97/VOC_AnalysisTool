@@ -4,37 +4,229 @@ from openpyxl.utils import get_column_letter
 import requests
 import json
 import re
+import os
+
+# 尝试导入配置文件
+try:
+    from config import HF_API_TOKEN, TONGYI_API_KEY, API_PRIORITY
+except ImportError:
+    # 如果配置文件不存在，使用默认值
+    HF_API_TOKEN = None
+    TONGYI_API_KEY = None
+    API_PRIORITY = ["hf_token", "tongyi", "hf_free", "local"]
 
 class VOCAnalyzer:
     def __init__(self):
-        # 使用Hugging Face的免费API（无需API key，但有限制）
-        # 或者可以使用Ollama本地模型
-        self.api_url = "https://api-inference.huggingface.co/models/uer/roberta-base-finetuned-chinanews-chinese"
-        # 备用：使用简单的规则+关键词匹配（如果API不可用）
+        # 加载API配置
+        self.hf_token = HF_API_TOKEN or os.getenv('HF_API_TOKEN')
+        self.tongyi_key = TONGYI_API_KEY or os.getenv('TONGYI_API_KEY')
+        self.api_priority = API_PRIORITY
+        
+        # Hugging Face API端点（使用Token）
+        self.hf_api_urls = [
+            "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct",
+            "https://api-inference.huggingface.co/models/Qwen/Qwen2-7B-Instruct",
+            "https://api-inference.huggingface.co/models/Qwen/Qwen2-1.5B-Instruct",
+            "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-14B-Instruct",
+        ]
+        
+        # Hugging Face免费API端点（无需Token，但可能不可用）
+        self.hf_free_api_urls = [
+            "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct",
+            "https://api-inference.huggingface.co/models/Qwen/Qwen2-7B-Instruct",
+            "https://api-inference.huggingface.co/models/Qwen/Qwen2-1.5B-Instruct",
+        ]
+        
+        # 通义千问API端点
+        self.tongyi_api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+        
+        self.current_api_index = 0
         self.use_local_analysis = False
+        self.stop_flag = None
+        
+        # 打印配置信息
+        print(f"[VOC Analyzer] 初始化完成")
+        if self.hf_token:
+            print(f"[VOC Analyzer] Hugging Face Token已配置")
+        if self.tongyi_key:
+            print(f"[VOC Analyzer] 通义千问API Key已配置")
+        print(f"[VOC Analyzer] API优先级: {', '.join(self.api_priority)}")
+    
+    def set_stop_flag(self, stop_flag):
+        """设置停止标志"""
+        self.stop_flag = stop_flag
     
     def analyze_with_ai(self, text):
-        """使用AI分析文本情感和分类"""
+        """使用Qwen AI分析文本情感和分类，按优先级尝试不同的API"""
         if self.use_local_analysis:
             return self.local_analyze(text)
         
+        # 构造prompt
+        prompt = f"""请分析以下用户反馈，返回JSON格式结果：
+{{
+    "sentiment": "正面/负面/中性",
+    "category": "功能问题/性能问题/界面问题/体验问题/服务问题/价格问题/其他问题"
+}}
+
+用户反馈：{text}
+
+请只返回JSON，不要其他内容："""
+        
+        # 按优先级尝试不同的API
+        for api_type in self.api_priority:
+            if api_type == "hf_token" and self.hf_token:
+                result = self._try_huggingface_token(prompt, text)
+                if result:
+                    return result
+            elif api_type == "tongyi" and self.tongyi_key:
+                result = self._try_tongyi_api(prompt, text)
+                if result:
+                    return result
+            elif api_type == "hf_free":
+                result = self._try_huggingface_free(prompt, text)
+                if result:
+                    return result
+            elif api_type == "local":
+                print("[Qwen API] 使用本地分析")
+                return self.local_analyze(text)
+        
+        # 所有API都失败，使用本地分析
+        print("[Qwen API] 所有API都不可用，使用本地分析")
+        return self.local_analyze(text)
+    
+    def _try_huggingface_token(self, prompt, text):
+        """尝试使用Hugging Face API Token"""
+        for api_url in self.hf_api_urls:
+            try:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.hf_token}"
+                }
+                payload = {
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_new_tokens": 150,
+                        "temperature": 0.3,
+                        "return_full_text": False
+                    }
+                }
+                
+                print(f"[HF Token API] 尝试调用: {api_url}")
+                response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    print(f"[HF Token API] 调用成功")
+                    return self.parse_ai_result(result, text)
+                elif response.status_code == 503:
+                    error_info = response.json() if response.content else {}
+                    estimated_time = error_info.get('estimated_time', 0)
+                    print(f"[HF Token API] 模型正在加载，预计等待时间: {estimated_time}秒")
+                    if estimated_time and estimated_time < 30:
+                        import time
+                        time.sleep(min(estimated_time + 2, 30))
+                        retry_response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+                        if retry_response.status_code == 200:
+                            return self.parse_ai_result(retry_response.json(), text)
+                    continue
+                else:
+                    print(f"[HF Token API] 错误 {response.status_code}: {response.text[:200]}")
+                    continue
+            except Exception as e:
+                print(f"[HF Token API] 调用失败: {e}")
+                continue
+        return None
+    
+    def _try_tongyi_api(self, prompt, text):
+        """尝试使用通义千问API"""
         try:
-            # 尝试使用Hugging Face API
-            headers = {"Content-Type": "application/json"}
-            payload = {"inputs": text}
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.tongyi_key}"
+            }
+            payload = {
+                "model": "qwen-turbo",  # 或 "qwen-plus", "qwen-max"
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                },
+                "parameters": {
+                    "max_tokens": 150,
+                    "temperature": 0.3
+                }
+            }
             
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=10)
+            print(f"[通义千问API] 尝试调用...")
+            response = requests.post(self.tongyi_api_url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 result = response.json()
-                # 解析结果
-                return self.parse_ai_result(result, text)
+                if result.get('output') and result['output'].get('choices'):
+                    generated_text = result['output']['choices'][0]['message']['content']
+                    print(f"[通义千问API] 调用成功")
+                    # 解析结果
+                    return self.parse_ai_result({'generated_text': generated_text}, text)
+                else:
+                    print(f"[通义千问API] 响应格式异常: {result}")
+                    return None
             else:
-                # API不可用时使用本地分析
-                return self.local_analyze(text)
+                print(f"[通义千问API] 错误 {response.status_code}: {response.text[:200]}")
+                return None
         except Exception as e:
-            print(f"AI分析失败，使用本地分析: {e}")
-            return self.local_analyze(text)
+            print(f"[通义千问API] 调用失败: {e}")
+            return None
+    
+    def _try_huggingface_free(self, prompt, text):
+        """尝试使用Hugging Face免费API（无需Token）"""
+        for api_url in self.hf_free_api_urls:
+            try:
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_new_tokens": 150,
+                        "temperature": 0.3,
+                        "return_full_text": False
+                    }
+                }
+                
+                print(f"[HF Free API] 尝试调用: {api_url}")
+                response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    print(f"[HF Free API] 调用成功")
+                    return self.parse_ai_result(result, text)
+                elif response.status_code == 503:
+                    error_info = response.json() if response.content else {}
+                    estimated_time = error_info.get('estimated_time', 0)
+                    print(f"[HF Free API] 模型正在加载，预计等待时间: {estimated_time}秒")
+                    if estimated_time and estimated_time < 30:
+                        import time
+                        time.sleep(min(estimated_time + 2, 30))
+                        retry_response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+                        if retry_response.status_code == 200:
+                            return self.parse_ai_result(retry_response.json(), text)
+                    continue
+                elif response.status_code == 410:
+                    print(f"[HF Free API] 模型不可用(410 - Gone)")
+                    continue
+                elif response.status_code == 429:
+                    print(f"[HF Free API] 请求过多(429)")
+                    import time
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"[HF Free API] 错误 {response.status_code}: {response.text[:200]}")
+                    continue
+            except Exception as e:
+                print(f"[HF Free API] 调用失败: {e}")
+                continue
+        return None
     
     def local_analyze(self, text):
         """本地规则分析（备用方案）"""
@@ -98,13 +290,64 @@ class VOCAnalyzer:
         return '其他问题'
     
     def parse_ai_result(self, result, text):
-        """解析AI返回结果"""
-        # 这里需要根据实际API返回格式调整
-        # 简化处理，使用本地分析
+        """解析Qwen返回的结果"""
+        try:
+            # Qwen2.5 API返回格式可能是列表或字典
+            generated_text = ""
+            if isinstance(result, list) and len(result) > 0:
+                if isinstance(result[0], dict):
+                    generated_text = result[0].get('generated_text', '')
+                else:
+                    generated_text = str(result[0])
+            elif isinstance(result, dict):
+                generated_text = result.get('generated_text', '')
+            else:
+                generated_text = str(result)
+            
+            # 尝试从返回文本中提取JSON
+            # 查找JSON对象
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', generated_text)
+            if json_match:
+                json_str = json_match.group()
+                parsed = json.loads(json_str)
+                
+                sentiment = parsed.get('sentiment', '中性')
+                category = parsed.get('category', '其他问题')
+                
+                # 标准化情感值
+                if '正面' in sentiment or 'positive' in sentiment.lower() or '积极' in sentiment:
+                    sentiment = '正面'
+                elif '负面' in sentiment or 'negative' in sentiment.lower() or '消极' in sentiment:
+                    sentiment = '负面'
+                else:
+                    sentiment = '中性'
+                
+                # 验证分类是否有效
+                valid_categories = ['功能问题', '性能问题', '界面问题', '体验问题', '服务问题', '价格问题', '其他问题']
+                if category not in valid_categories:
+                    # 尝试从文本中匹配分类
+                    category = self.categorize_text(text)
+                
+                return {
+                    'sentiment': sentiment,
+                    'category': category,
+                    'confidence': 0.85
+                }
+        except json.JSONDecodeError as e:
+            print(f"JSON解析失败: {e}, 返回文本: {generated_text[:100]}")
+        except Exception as e:
+            print(f"解析Qwen结果失败: {e}, 使用本地分析")
+        
+        # 如果解析失败，使用本地分析
         return self.local_analyze(text)
     
-    def analyze_and_categorize(self, file_path):
-        """分析VOC文件并分类"""
+    def analyze_and_categorize(self, file_path, progress_callback=None):
+        """分析VOC文件并分类
+        
+        Args:
+            file_path: Excel文件路径
+            progress_callback: 进度回调函数，接收 (current, total, message) 参数
+        """
         wb = load_workbook(file_path)
         sheets_data = []
         
@@ -131,6 +374,9 @@ class VOCAnalyzer:
                         break
             
             # 读取所有数据行
+            if progress_callback:
+                progress_callback(0, 100, f'正在读取工作表 "{sheet_name}"...')
+            
             for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
                 if row_idx == 1:
                     continue  # 跳过表头
@@ -144,10 +390,29 @@ class VOCAnalyzer:
                             'original_row': row_idx
                         })
             
+            total_rows = len(rows_data)
+            if progress_callback:
+                progress_callback(0, total_rows, f'开始分析工作表 "{sheet_name}"，共 {total_rows} 条反馈...')
+            
             # 对反馈进行分类
             categorized_data = {}
-            for row_info in rows_data:
+            for idx, row_info in enumerate(rows_data, 1):
+                # 检查是否应该停止
+                if self.stop_flag and self.stop_flag.is_set():
+                    print(f"[停止分析] 检测到停止标志，终止分析")
+                    raise KeyboardInterrupt("分析被用户终止")
+                
+                # 更新进度
+                if progress_callback:
+                    progress_callback(idx, total_rows, f'正在分析第 {idx}/{total_rows} 条反馈...')
+                
                 analysis = self.analyze_with_ai(row_info['feedback'])
+                
+                # 再次检查停止标志
+                if self.stop_flag and self.stop_flag.is_set():
+                    print(f"[停止分析] 检测到停止标志，终止分析")
+                    raise KeyboardInterrupt("分析被用户终止")
+                
                 category = analysis['category']
                 sentiment = analysis['sentiment']
                 
