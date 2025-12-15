@@ -32,7 +32,7 @@ function App() {
 
     // 监听页面卸载事件（不会阻止刷新）
     window.addEventListener('unload', handleUnload)
-    
+
     // 组件卸载时清理
     return () => {
       window.removeEventListener('unload', handleUnload)
@@ -52,10 +52,10 @@ function App() {
     setIsAnalyzing(true)
     setErrorMessage(null)
     setCountdown(null)
-    
+
     // 创建AbortController用于取消请求
     abortControllerRef.current = new AbortController()
-    
+
     const formData = new FormData()
     formData.append('file', file)
 
@@ -87,13 +87,14 @@ function App() {
       }
       setFileData(data)
       console.log('[上传] 已设置fileData')
-      
-      // 上传成功后自动开始AI分析
-      setTimeout(() => {
-        console.log('[上传] 开始自动分析...')
-        handleAnalyze(data)
-      }, 1000) // 等待1秒让表格先显示
+
+      setFileData(data)
+      console.log('[上传] 已设置fileData')
+
+      // 上传成功后不自动开始AI分析，等待用户点击
+      setIsAnalyzing(false)
     } catch (error) {
+
       if (error.name === 'AbortError') {
         setErrorMessage('请求已取消')
       } else {
@@ -116,13 +117,13 @@ function App() {
     setErrorMessage(null)
     setProgress(null)
     setCountdown(timeoutSeconds)
-    
+
     // 关闭之前的EventSource
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
       eventSourceRef.current = null
     }
-    
+
     // 启动倒计时
     countdownTimerRef.current = setInterval(() => {
       setCountdown((prev) => {
@@ -202,7 +203,7 @@ function App() {
                 try {
                   const data = JSON.parse(line.slice(6))
                   console.log('[前端] 收到SSE数据:', data.type, data)
-                  
+
                   if (data.type === 'progress') {
                     setProgress({
                       current: data.current,
@@ -335,7 +336,7 @@ function App() {
                       )}
                     </span>
                   </div>
-                  <button 
+                  <button
                     onClick={async () => {
                       if (fileData && fileData.fileId) {
                         try {
@@ -344,12 +345,12 @@ function App() {
                             eventSourceRef.current.close()
                             eventSourceRef.current = null
                           }
-                          
+
                           // 取消前端请求
                           if (abortControllerRef.current) {
                             abortControllerRef.current.abort()
                           }
-                          
+
                           // 通知后端停止分析
                           await fetch('/api/analyze/stop', {
                             method: 'POST',
@@ -358,7 +359,7 @@ function App() {
                             },
                             body: JSON.stringify({ fileId: fileData.fileId })
                           })
-                          
+
                           setIsAnalyzing(false)
                           setCountdown(null)
                           setProgress(null)
@@ -380,11 +381,11 @@ function App() {
                 </>
               )}
               {!isAnalyzing && fileData && fileData.sheets && fileData.sheets.length > 0 && (
-                <button 
-                  onClick={() => handleAnalyze()} 
+                <button
+                  onClick={() => handleAnalyze()}
                   className="btn-primary"
                 >
-                  重新分析
+                  开始AI分析
                 </button>
               )}
             </div>
@@ -392,7 +393,7 @@ function App() {
               <div className="error-message">
                 <span className="error-icon">⚠️</span>
                 <span>{errorMessage}</span>
-                <button 
+                <button
                   className="error-close"
                   onClick={() => setErrorMessage(null)}
                 >

@@ -67,8 +67,8 @@ class VOCAnalyzer:
         # 构造prompt
         prompt = f"""请分析以下用户反馈，返回JSON格式结果：
 {{
-    "sentiment": "正面/负面/中性",
-    "category": "功能问题/性能问题/界面问题/体验问题/服务问题/价格问题/其他问题"
+    "summary": "标准化的问题分类（请务必使用通用的短语，确保相似问题被归为同一类。例如：'主题数量少'和'模板不足'应统一归类为'主题内容丰富度不足'。其他示例：功能灵活性缺失、登录异常、页面加载慢）",
+    "sentiment": "正面😊/负面😠/中性😐"
 }}
 
 用户反馈：{text}
@@ -299,11 +299,18 @@ class VOCAnalyzer:
             sentiment = '中性'
         
         # 简单分类
-        category = self.categorize_text(text)
+        summary = self.categorize_text(text)
+        
+        # 添加简单表情
+        sentiment_emoji = {
+            '正面': '正面😊',
+            '负面': '负面😠',
+            '中性': '中性😐'
+        }
         
         return {
-            'sentiment': sentiment,
-            'category': category,
+            'sentiment': sentiment_emoji.get(sentiment, sentiment),
+            'summary': summary,
             'confidence': 0.7
         }
     
@@ -358,26 +365,14 @@ class VOCAnalyzer:
                 json_str = json_match.group()
                 parsed = json.loads(json_str)
                 
-                sentiment = parsed.get('sentiment', '中性')
-                category = parsed.get('category', '其他问题')
+                sentiment = parsed.get('sentiment', '中性😐')
+                summary = parsed.get('summary', '其他问题')
                 
-                # 标准化情感值
-                if '正面' in sentiment or 'positive' in sentiment.lower() or '积极' in sentiment:
-                    sentiment = '正面'
-                elif '负面' in sentiment or 'negative' in sentiment.lower() or '消极' in sentiment:
-                    sentiment = '负面'
-                else:
-                    sentiment = '中性'
-                
-                # 验证分类是否有效
-                valid_categories = ['功能问题', '性能问题', '界面问题', '体验问题', '服务问题', '价格问题', '其他问题']
-                if category not in valid_categories:
-                    # 尝试从文本中匹配分类
-                    category = self.categorize_text(text)
+                # 移除情感标准化和分类验证，直接使用AI生成的内容
                 
                 return {
                     'sentiment': sentiment,
-                    'category': category,
+                    'summary': summary,
                     'confidence': 0.85
                 }
         except json.JSONDecodeError as e:
@@ -467,13 +462,13 @@ class VOCAnalyzer:
                     print(f"[停止分析] 检测到停止标志，终止分析")
                     raise KeyboardInterrupt("分析被用户终止")
                 
-                category = analysis['category']
+                summary = analysis['summary']
                 sentiment = analysis['sentiment']
                 
-                key = f"{category}_{sentiment}"
+                key = f"{summary}_{sentiment}"
                 if key not in categorized_data:
                     categorized_data[key] = {
-                        'category': category,
+                        'summary': summary,
                         'sentiment': sentiment,
                         'rows': []
                     }
@@ -518,11 +513,11 @@ class VOCAnalyzer:
                         }
                     })
         
-        column = []
+        column = {}
         for col_idx in range(1, ws.max_column + 1):
             col_letter = get_column_letter(col_idx)
             width = ws.column_dimensions[col_letter].width if ws.column_dimensions[col_letter].width else 73
-            column.append({ 'wch': width })
+            column[str(col_idx - 1)] = int(width) if width else 73
         
         return {
             'name': sheet_name,
@@ -557,8 +552,10 @@ class VOCAnalyzer:
         merge_cells = []
         current_row = 0
         
-        # 添加表头
-        for col_idx, header in enumerate(headers):
+        # 添加表头 - 根据用户要求的格式
+        # 1. 问题概括 2. 用户情绪 3. VOC原声
+        custom_headers = ['问题概括', '用户情绪', 'VOC原声']
+        for col_idx, header in enumerate(custom_headers):
             cells.append({
                 'r': current_row,
                 'c': col_idx,
@@ -573,23 +570,23 @@ class VOCAnalyzer:
         # 按分类添加数据
         for key in sorted(categorized_data.keys()):
             category_info = categorized_data[key]
-            category = category_info['category']
+            summary = category_info['summary']
             sentiment = category_info['sentiment']
             num_rows = len(category_info['rows'])
             
             if num_rows > 0:
-                # 添加分类标题行（第一个单元格：分类名称）
+                # 添加问题概括（合并单元格）
                 cells.append({
                     'r': current_row,
                     'c': 0,
                     'v': {
-                        'v': category,
-                        'm': category,
+                        'v': summary,
+                        'm': summary,
                         'ct': {'fa': 'General', 't': 'g'}
                     }
                 })
                 
-                # 第二个单元格：情感
+                # 添加用户情绪（合并单元格）
                 cells.append({
                     'r': current_row,
                     'c': 1,
@@ -601,7 +598,7 @@ class VOCAnalyzer:
                 })
                 
                 # 记录合并单元格信息
-                # 合并第一列（分类名称）
+                # 合并第一列（问题概括）
                 merge_cells.append({
                     'r': current_row,
                     'c': 0,
@@ -609,7 +606,7 @@ class VOCAnalyzer:
                     'cs': 1
                 })
                 
-                # 合并第二列（情感）
+                # 合并第二列（用户情绪）
                 merge_cells.append({
                     'r': current_row,
                     'c': 1,
@@ -617,25 +614,26 @@ class VOCAnalyzer:
                     'cs': 1
                 })
                 
-                # 添加该分类下的所有行
+                # 添加该分类下的所有行 - 只展示VOC原声
                 for row_info in category_info['rows']:
-                    for col_idx, cell_value in enumerate(row_info['row_data']):
-                        if cell_value is not None:
-                            cells.append({
-                                'r': current_row,
-                                'c': col_idx,
-                                'v': {
-                                    'v': cell_value,
-                                    'm': str(cell_value),
-                                    'ct': {'fa': 'General', 't': 'g'}
-                                }
-                            })
+                    # 第3列：VOC原声
+                    cells.append({
+                        'r': current_row,
+                        'c': 2,
+                        'v': {
+                            'v': row_info['feedback'],
+                            'm': str(row_info['feedback']),
+                            'ct': {'fa': 'General', 't': 'g'}
+                        }
+                    })
                     current_row += 1
         
         # 设置列宽
-        column = []
-        for col_idx in range(len(headers)):
-            column.append({ 'wch': 100 })
+        column = {
+            "0": 200,  # 问题概括
+            "1": 120,  # 用户情绪
+            "2": 400   # VOC原声
+        }
         
         return {
             'name': sheet_name,
@@ -671,7 +669,7 @@ class VOCAnalyzer:
         current_row = 0
         
         # 表头
-        headers = ['分类', '情感', '数量', '占比']
+        headers = ['问题概括', '用户情绪', '数量', '占比']
         for col_idx, header in enumerate(headers):
             cells.append({
                 'r': current_row,
@@ -687,30 +685,30 @@ class VOCAnalyzer:
         # 统计每个分类的数据
         summary_stats = {}
         for key, category_info in categorized_data.items():
-            category = category_info['category']
+            summary = category_info['summary']
             sentiment = category_info['sentiment']
             count = len(category_info['rows'])
             
             # 按分类和情感统计
-            if category not in summary_stats:
-                summary_stats[category] = {}
-            if sentiment not in summary_stats[category]:
-                summary_stats[category][sentiment] = 0
-            summary_stats[category][sentiment] += count
+            if summary not in summary_stats:
+                summary_stats[summary] = {}
+            if sentiment not in summary_stats[summary]:
+                summary_stats[summary][sentiment] = 0
+            summary_stats[summary][sentiment] += count
         
         # 按分类名称排序
-        for category in sorted(summary_stats.keys()):
-            for sentiment in sorted(summary_stats[category].keys()):
-                count = summary_stats[category][sentiment]
+        for summary in sorted(summary_stats.keys()):
+            for sentiment in sorted(summary_stats[summary].keys()):
+                count = summary_stats[summary][sentiment]
                 percentage = (count / total_rows * 100) if total_rows > 0 else 0
                 
-                # 分类
+                # 问题概括
                 cells.append({
                     'r': current_row,
                     'c': 0,
                     'v': {
-                        'v': category,
-                        'm': category,
+                        'v': summary,
+                        'm': summary,
                         'ct': {'fa': 'General', 't': 'g'}
                     }
                 })
@@ -790,12 +788,12 @@ class VOCAnalyzer:
         })
         
         # 设置列宽
-        column = [
-            {'wch': 120},  # 分类
-            {'wch': 80},   # 情感
-            {'wch': 80},   # 数量
-            {'wch': 100}   # 占比
-        ]
+        column = {
+            "0": 120,  # 分类
+            "1": 80,   # 情感
+            "2": 80,   # 数量
+            "3": 100   # 占比
+        }
         
         return {
             'name': sheet_name,

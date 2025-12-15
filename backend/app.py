@@ -70,11 +70,13 @@ def upload_file():
             print(f"[上传] Sheet {sheet_name} 共读取 {cell_count} 个单元格")
             
             # 设置列宽
-            column = []
+            # 设置列宽
+            column = {}
             for col_idx in range(1, ws.max_column + 1):
                 col_letter = get_column_letter(col_idx)
                 width = ws.column_dimensions[col_letter].width if ws.column_dimensions[col_letter].width else 73
-                column.append({ 'wch': width })
+                # Luckysheet/FortuneSheet expects key to be string index "0", "1", etc.
+                column[str(col_idx - 1)] = int(width) if width else 73
             
             sheet_data = {
                 'name': sheet_name,
