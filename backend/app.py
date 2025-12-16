@@ -22,7 +22,26 @@ if not os.path.exists(UPLOAD_FOLDER):
 analyzer = VOCAnalyzer()
 
 # 用于跟踪分析任务的状态
+# 用于跟踪分析任务的状态
 analysis_tasks = {}  # {file_id: {'stop_flag': threading.Event(), 'thread': thread}}
+
+@app.route('/api/log_feedback', methods=['POST'])
+def log_feedback():
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
+        # Log to file
+        log_file = os.path.join(os.path.dirname(__file__), 'training_data.jsonl')
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(data, ensure_ascii=False) + '\n')
+            
+        print(f"[Feedback] Logged implicit feedback: {data.get('event_type')}")
+        return jsonify({'status': 'success', 'message': 'Feedback logged'}), 200
+    except Exception as e:
+        print(f"[Feedback] Error logging feedback: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -163,8 +182,9 @@ def analyze_voc():
                     progress_queue.put(('progress', current, total, message))
             
             # 分析VOC数据
-            print(f"[分析任务] 调用 analyze_and_categorize...")
-            analyzed_sheets = analyzer.analyze_and_categorize(file_path, progress_callback=progress_callback)
+            print(f"[分析任务] 调用 analyze_file...")
+            analyzer.progress_callback = progress_callback
+            analyzed_sheets = analyzer.analyze_file(file_path)
             print(f"[分析任务] 分析完成，得到 {len(analyzed_sheets) if analyzed_sheets else 0} 个sheet")
             
             if stop_flag.is_set():

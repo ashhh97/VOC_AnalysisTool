@@ -1,10 +1,13 @@
 import openpyxl
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 import requests
 import json
 import re
 import os
+import math
+import pandas as pd
+from datetime import datetime
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 # 尝试导入配置文件
 try:
@@ -65,15 +68,39 @@ class VOCAnalyzer:
             return self.local_analyze(text)
         
         # 构造prompt
-        prompt = f"""请分析以下用户反馈，返回JSON格式结果：
+        prompt = f"""Role (角色设定):
+你是一名拥有10年经验的 B2B SaaS 产品体验分析师。你的任务是清洗用户反馈数据（VOC），精准识别用户痛点，并进行标准化的分类归纳。
+
+Critical Rules (核心判别规则 - 必须严格遵守):
+1. Bug vs. 灵活性 (最高优先级):
+   - 判定为 [功能 - Bug/稳定性]：当用户描述"操作无效"、"报错"、"显示异常"、"死机"、"明明设置了但没反应"等预期功能失效的情况。
+   - 判定为 [功能 - 灵活性/配置能力]：只有当用户明确表示"希望能自定义..."、"想要支持...功能"、"目前选项太少"等新增需求时。
+   - 案例："主页板块加链接后图片不显示" -> [功能 - Bug/稳定性]。
+
+2. 概括度控制 (归纳法):
+   - 将相似的具体问题向上归纳到父类目。
+   - 案例："新手教程缺失"、"开发文档不全" -> [服务 - 帮助与引导]。
+
+Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
+- 功能 - Bug/稳定性
+- 功能 - 灵活性/配置能力
+- 功能 - 实用性/完整度
+- 体验 - 操作复杂度
+- 体验 - 性能/加载速度
+- 资源 - 模板丰富度
+- 资源 - 插件生态
+- 服务 - 帮助与引导
+
+请分析以下用户反馈，返回一个JSON对象：
 {{
-    "summary": "标准化的问题分类（请务必使用通用的短语，确保相似问题被归为同一类。例如：'主题数量少'和'模板不足'应统一归类为'主题内容丰富度不足'。其他示例：功能灵活性缺失、登录异常、页面加载慢）",
-    "sentiment": "正面😊/负面😠/中性😐"
+    "category": "必须从上方Taxonomy列表中选择一个标准的分类名称 (例如: 功能 - Bug/稳定性)",
+    "sentiment": "正面😊/负面😠/中性😐",
+    "rationale": "简短的分类理由"
 }}
 
 用户反馈：{text}
 
-请只返回JSON，不要其他内容："""
+请只返回单个JSON对象："""
         
         # 按优先级尝试不同的API
         for api_type in self.api_priority:
@@ -308,31 +335,31 @@ class VOCAnalyzer:
             '中性': '中性😐'
         }
         
-        return {
+        return [{
             'sentiment': sentiment_emoji.get(sentiment, sentiment),
             'summary': summary,
+            'snippet': text,
             'confidence': 0.7
-        }
+        }]
     
     def categorize_text(self, text):
         """简单的文本分类"""
         text_lower = text.lower()
         
         categories = {
-            '功能问题': ['功能', '不能', '无法', '不支持', '缺少', '没有', '缺失', '不完善', '不完整', '缺少功能'],
-            '性能问题': ['慢', '卡', '延迟', '加载', '响应', '卡顿', '卡死', '运行慢', '速度', '性能', '优化'],
-            '界面问题': ['界面', 'UI', '设计', '布局', '显示', '美观', '样式', '颜色', '字体', '图标', '按钮'],
-            '体验问题': ['体验', '使用', '操作', '流程', '方便', '易用', '简单', '复杂', '麻烦', '顺手', '习惯'],
-            '服务问题': ['服务', '客服', '支持', '帮助', '响应', '态度', '处理', '售后', '咨询', '反馈'],
-            '价格问题': ['价格', '费用', '收费', '贵', '便宜', '性价比', '价值', '划算', '不值', '定价'],
-            '其他问题': []
+            '功能 - Bug/稳定性': ['功能', '不能', '无法', '不支持', '缺少', '没有', '缺失', '不完善', '不完整', '死机', '报错', '失效', '不显示'],
+            '功能 - 灵活性/配置能力': ['自定义', '配置', '选项', '灵活', '更多功能', '支持', '设置'],
+            '功能 - 实用性/完整度': ['半成品', '不好用', '鸡肋', '没用', '奇怪'],
+            '体验 - 操作复杂度': ['难找', '步骤', '复杂', '麻烦', '逻辑', '反人类', '难用'],
+            '体验 - 性能/加载速度': ['慢', '卡', '延迟', '加载', '响应', '卡顿', '速度', '性能', '优化'],
+            '资源 - 模板丰富度': ['模板', '风格', '主题', '样式'],
+            '资源 - 插件生态': ['插件', '扩展', '应用'],
+            '服务 - 帮助与引导': ['文档', '教程', '指引', '说明', '帮助', '客服', '支持'],
         }
         
         # 计算每个类别的匹配分数
         category_scores = {}
         for category, keywords in categories.items():
-            if category == '其他问题':
-                continue
             score = sum(1 for kw in keywords if kw in text)
             if score > 0:
                 category_scores[category] = score
@@ -344,482 +371,421 @@ class VOCAnalyzer:
         return '其他问题'
     
     def parse_ai_result(self, result, text):
-        """解析Qwen返回的结果"""
+        """解析AI返回的JSON结果"""
+        import json
         try:
-            # Qwen2.5 API返回格式可能是列表或字典
             generated_text = ""
-            if isinstance(result, list) and len(result) > 0:
-                if isinstance(result[0], dict):
-                    generated_text = result[0].get('generated_text', '')
-                else:
-                    generated_text = str(result[0])
-            elif isinstance(result, dict):
-                generated_text = result.get('generated_text', '')
-            else:
-                generated_text = str(result)
+            # 获取生成的文本
+            if isinstance(result, dict):
+                if 'generated_text' in result:
+                    generated_text = result['generated_text']
+                elif 'text' in result:
+                     generated_text = result['text']
+            elif isinstance(result, str):
+                generated_text = result
+
+            if not generated_text:
+                return None
+
+            # 尝试解析JSON
+            # 清理可能的markdown标记
+            clean_text = generated_text.strip()
+            if clean_text.startswith('```json'):
+                clean_text = clean_text[7:]
+            if clean_text.startswith('```'):
+                clean_text = clean_text[3:]
+            if clean_text.endswith('```'):
+                clean_text = clean_text[:-3]
+            clean_text = clean_text.strip()
             
-            # 尝试从返回文本中提取JSON
-            # 查找JSON对象
-            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', generated_text)
-            if json_match:
-                json_str = json_match.group()
-                parsed = json.loads(json_str)
+            # 找到JSON数组部分
+            start = clean_text.find('[')
+            end = clean_text.rfind(']') + 1
+            
+            parsed = None
+            if start != -1 and end != -1:
+                json_str = clean_text[start:end]
+                try:
+                    parsed = json.loads(json_str)
+                except:
+                    pass
+            
+            # 如果没找到数组，尝试解析整个文本为对象
+            if not parsed:
+                 try:
+                    parsed = json.loads(clean_text)
+                    if isinstance(parsed, dict):
+                        parsed = [parsed]
+                 except:
+                    pass
+
+            if not parsed:
+                return None
                 
-                sentiment = parsed.get('sentiment', '中性😐')
-                summary = parsed.get('summary', '其他问题')
+            validated_results = []
+            for item in parsed:
+                sentiment = item.get('sentiment', '中性😐')
+                # 适配新Prompt的返回字段 'category'
+                summary = item.get('category') or item.get('summary') or '其他问题'
+                snippet = item.get('snippet', text) 
                 
-                # 移除情感标准化和分类验证，直接使用AI生成的内容
-                
-                return {
+                validated_results.append({
                     'sentiment': sentiment,
                     'summary': summary,
+                    'snippet': snippet,
                     'confidence': 0.85
-                }
-        except json.JSONDecodeError as e:
-            print(f"JSON解析失败: {e}, 返回文本: {generated_text[:100]}")
+                })
+            
+            return validated_results
+
         except Exception as e:
-            print(f"解析Qwen结果失败: {e}, 使用本地分析")
+            print(f"[Parse] Error: {str(e)}")
+            return None
+            
+    def analyze_and_categorize(self, rows_data, feedback_col):
+        """分析并分类数据（支持多观点拆分）"""
+        print(f"[Analyze] Analyzing {len(rows_data)} rows...")
         
-        # 如果解析失败，使用本地分析
-        return self.local_analyze(text)
-    
-    def analyze_and_categorize(self, file_path, progress_callback=None):
-        """分析VOC文件并分类
+        # 扁平化的所有意见列表，包含 row_id 用于计算用户数
+        all_opinions = []
         
-        Args:
-            file_path: Excel文件路径
-            progress_callback: 进度回调函数，接收 (current, total, message) 参数
-        """
-        wb = load_workbook(file_path)
-        sheets_data = []
-        
-        # 处理每个sheet
-        for sheet_idx, sheet_name in enumerate(wb.sheetnames):
-            ws = wb[sheet_name]
+        total_rows = len(rows_data)
+        if hasattr(self, 'progress_callback') and self.progress_callback:
+            self.progress_callback(0, total_rows, f'开始分析，共 {total_rows} 条反馈...')
             
-            # 读取原始数据
-            rows_data = []
-            headers = []
-            
-            # 读取第一行作为表头
-            first_row = next(ws.iter_rows(values_only=True), None)
-            if first_row:
-                headers = [str(cell) if cell else f'列{i+1}' for i, cell in enumerate(first_row)]
-            
-            # 读取数据行（假设用户反馈在第二列，可以根据实际情况调整）
-            feedback_column_idx = 1  # 默认第二列（索引从0开始）
-            if len(headers) > 1:
-                # 尝试找到包含"反馈"、"意见"、"评论"等关键词的列
-                for idx, header in enumerate(headers):
-                    if any(keyword in str(header).lower() for keyword in ['反馈', '意见', '评论', '评价', '内容']):
-                        feedback_column_idx = idx
-                        break
-            
-            # 读取所有数据行
-            if progress_callback:
-                progress_callback(0, 100, f'正在读取工作表 "{sheet_name}"...')
-            
-            for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-                if row_idx == 1:
-                    continue  # 跳过表头
+        for idx, row_info in enumerate(rows_data, 1):
+            if self.stop_flag and self.stop_flag.is_set():
+                raise KeyboardInterrupt("分析被用户终止")
                 
-                if len(row) > feedback_column_idx and row[feedback_column_idx]:
-                    feedback_text = str(row[feedback_column_idx]).strip()
-                    if feedback_text:
-                        rows_data.append({
-                            'row_data': list(row),
-                            'feedback': feedback_text,
-                            'original_row': row_idx
-                        })
+            if hasattr(self, 'progress_callback') and self.progress_callback:
+                self.progress_callback(idx, total_rows, f'正在分析第 {idx}/{total_rows} 条反馈...')
             
-            total_rows = len(rows_data)
-            if progress_callback:
-                progress_callback(0, total_rows, f'开始分析工作表 "{sheet_name}"，共 {total_rows} 条反馈...')
+            # AI 分析返回列表
+            analysis_list = self.analyze_with_ai(row_info[feedback_col])
             
-            # 对反馈进行分类
-            categorized_data = {}
-            for idx, row_info in enumerate(rows_data, 1):
-                # 检查是否应该停止
-                if self.stop_flag and self.stop_flag.is_set():
-                    print(f"[停止分析] 检测到停止标志，终止分析")
-                    raise KeyboardInterrupt("分析被用户终止")
-                
-                # 更新进度
-                if progress_callback:
-                    progress_callback(idx, total_rows, f'正在分析第 {idx}/{total_rows} 条反馈...')
-                
-                # 调用AI分析
-                analysis = self.analyze_with_ai(row_info['feedback'])
-                
-                # 在API调用之间添加小延迟，避免触发速率限制
-                # 通义千问API有速率限制，每次调用后等待0.3秒
-                if self.tongyi_key and idx < total_rows:  # 最后一条不需要等待
-                    import time
-                    time.sleep(0.3)
-                
-                # 再次检查停止标志
-                if self.stop_flag and self.stop_flag.is_set():
-                    print(f"[停止分析] 检测到停止标志，终止分析")
-                    raise KeyboardInterrupt("分析被用户终止")
-                
-                summary = analysis['summary']
-                sentiment = analysis['sentiment']
-                
-                key = f"{summary}_{sentiment}"
-                if key not in categorized_data:
-                    categorized_data[key] = {
-                        'summary': summary,
-                        'sentiment': sentiment,
-                        'rows': []
-                    }
-                categorized_data[key]['rows'].append(row_info)
+            # API 延迟
+            if self.tongyi_key and idx < total_rows:
+                import time
+                time.sleep(0.3)
             
-            # 创建新的sheet数据
-            new_sheet_name = f"{sheet_name}_分析结果"
+            # 扁平化存储 (不拆分，直接存)
+            # 兼容返回列表的情况（如果有）
+            first_opinion = analysis_list[0] if analysis_list and len(analysis_list) > 0 else {
+                'summary': '其他问题', 'sentiment': '中性😐'
+            }
+
             
-            # 先添加原始sheet
-            original_sheet_data = self.create_sheet_data(ws, sheet_name, sheet_idx)
-            sheets_data.append(original_sheet_data)
-            
-            # 创建分析结果sheet
-            analyzed_sheet_data = self.create_analyzed_sheet(
-                headers, categorized_data, new_sheet_name, len(sheets_data)
-            )
-            sheets_data.append(analyzed_sheet_data)
-            
-            # 创建分类统计sheet
-            summary_sheet_name = f"{sheet_name}_分类统计"
-            summary_sheet_data = self.create_category_summary_sheet(
-                categorized_data, summary_sheet_name, len(sheets_data), total_rows
-            )
-            sheets_data.append(summary_sheet_data)
-        
-        return sheets_data
-    
-    def create_sheet_data(self, ws, sheet_name, index):
-        """创建原始sheet的Luckysheet数据"""
-        cells = []
-        
-        for row_idx, row in enumerate(ws.iter_rows(values_only=False), start=1):
-            for col_idx, cell in enumerate(row, start=1):
-                if cell.value is not None:
-                    cells.append({
-                        'r': row_idx - 1,
-                        'c': col_idx - 1,
-                        'v': {
-                            'v': cell.value,
-                            'm': str(cell.value),
-                            'ct': {'fa': 'General', 't': 'g'}
-                        }
-                    })
-        
-        column = {}
-        for col_idx in range(1, ws.max_column + 1):
-            col_letter = get_column_letter(col_idx)
-            width = ws.column_dimensions[col_letter].width if ws.column_dimensions[col_letter].width else 73
-            column[str(col_idx - 1)] = int(width) if width else 73
-        
-        return {
-            'name': sheet_name,
-            'index': index,
-            'order': index,
-            'status': 1,
-            'celldata': cells,
-            'config': {
-                'columnlen': column,
-                'rowlen': {}
-            },
-            'scrollLeft': 0,
-            'scrollTop': 0,
-            'luckysheet_select_save': [],
-            'calc chain': [],
-            'isPivotTable': False,
-            'pivotTable': {},
-            'filter_select': None,
-            'filter': None,
-            'luckysheet_conditionformat_save': [],
-            'frozen': {},
-            'chart': [],
-            'zoomRatio': 1,
-            'image': [],
-            'showGridLines': 1,
-            'dataVerification': {}
-        }
-    
-    def create_analyzed_sheet(self, headers, categorized_data, sheet_name, index):
-        """创建分析结果sheet"""
-        cells = []
-        merge_cells = []
-        current_row = 0
-        
-        # 添加表头 - 根据用户要求的格式
-        # 1. 问题概括 2. 用户情绪 3. VOC原声
-        custom_headers = ['问题概括', '用户情绪', 'VOC原声']
-        for col_idx, header in enumerate(custom_headers):
-            cells.append({
-                'r': current_row,
-                'c': col_idx,
-                'v': {
-                    'v': header,
-                    'm': str(header),
-                    'ct': {'fa': 'General', 't': 'g'}
-                }
+            all_opinions.append({
+                'row_id': idx,
+                'summary': first_opinion['summary'],
+                'sentiment': first_opinion['sentiment'],
+                'snippet': row_info[feedback_col], # snippet直接等于全文
+                'full_feedback': row_info[feedback_col]
             })
-        current_row += 1
+                
+        return all_opinions
+
+    def generate_analysis_sheet(self, all_opinions, total_users, sheet_name, sort_by='opinion'):
+        """生成分析Sheet (通用方法)
+        sort_by: 'opinion' (按意见数排序) or 'user' (按用户数排序)
+        """
+        print(f"[Sheet] Generating sheet: {sheet_name}, sort_by={sort_by}")
         
-        # 按分类添加数据
-        for key in sorted(categorized_data.keys()):
-            category_info = categorized_data[key]
-            summary = category_info['summary']
-            sentiment = category_info['sentiment']
-            num_rows = len(category_info['rows'])
+        total_opinions = len(all_opinions)
+        
+        # 1. 分组统计
+        # Key: (Summary, Sentiment)
+        groups = {}
+        
+        for op in all_opinions:
+            key = (op['summary'], op['sentiment'])
+            if key not in groups:
+                groups[key] = {
+                    'summary': op['summary'],
+                    'sentiment': op['sentiment'],
+                    'opinions': [],
+                    'user_ids': set()
+                }
+            groups[key]['opinions'].append(op)
+            groups[key]['user_ids'].add(op['row_id'])
             
-            if num_rows > 0:
-                # 添加问题概括（合并单元格）
-                cells.append({
-                    'r': current_row,
-                    'c': 0,
-                    'v': {
-                        'v': summary,
-                        'm': summary,
-                        'ct': {'fa': 'General', 't': 'g'}
-                    }
-                })
-                
-                # 添加用户情绪（合并单元格）
-                cells.append({
-                    'r': current_row,
-                    'c': 1,
-                    'v': {
-                        'v': sentiment,
-                        'm': sentiment,
-                        'ct': {'fa': 'General', 't': 'g'}
-                    }
-                })
-                
-                # 记录合并单元格信息
-                # 合并第一列（问题概括）
-                merge_cells.append({
-                    'r': current_row,
-                    'c': 0,
-                    'rs': num_rows,
-                    'cs': 1
-                })
-                
-                # 合并第二列（用户情绪）
-                merge_cells.append({
-                    'r': current_row,
-                    'c': 1,
-                    'rs': num_rows,
-                    'cs': 1
-                })
-                
-                # 添加该分类下的所有行 - 只展示VOC原声
-                for row_info in category_info['rows']:
-                    # 第3列：VOC原声
-                    cells.append({
-                        'r': current_row,
-                        'c': 2,
-                        'v': {
-                            'v': row_info['feedback'],
-                            'm': str(row_info['feedback']),
-                            'ct': {'fa': 'General', 't': 'g'}
-                        }
-                    })
-                    current_row += 1
-        
-        # 设置列宽
-        column = {
-            "0": 200,  # 问题概括
-            "1": 120,  # 用户情绪
-            "2": 400   # VOC原声
-        }
-        
-        return {
-            'name': sheet_name,
-            'index': index,
-            'order': index,
-            'status': 1,
-            'celldata': cells,
-            'config': {
-                'columnlen': column,
-                'rowlen': {}
-            },
-            'scrollLeft': 0,
-            'scrollTop': 0,
-            'luckysheet_select_save': [],
-            'calc chain': [],
-            'isPivotTable': False,
-            'pivotTable': {},
-            'filter_select': None,
-            'filter': None,
-            'luckysheet_conditionformat_save': [],
-            'frozen': {},
-            'chart': [],
-            'zoomRatio': 1,
-            'image': [],
-            'showGridLines': 1,
-            'dataVerification': {},
-            'merge': merge_cells if merge_cells else {}
-        }
-    
-    def create_category_summary_sheet(self, categorized_data, sheet_name, index, total_rows):
-        """创建VOC分类统计sheet"""
-        cells = []
-        current_row = 0
+        # 2. 转换为列表并排序
+        group_list = []
+        for key, data in groups.items():
+            op_count = len(data['opinions'])
+            user_count = len(data['user_ids'])
+            group_list.append({
+                'summary': data['summary'],
+                'sentiment': data['sentiment'],
+                'opinions': data['opinions'],
+                'op_count': op_count,
+                'op_pct': op_count / total_opinions if total_opinions > 0 else 0,
+                'user_count': user_count,
+                'user_pct': user_count / total_users if total_users > 0 else 0
+            })
+            
+        # 排序逻辑
+        if sort_by == 'user':
+            # 按用户数降序 -> 意见数降序
+            group_list.sort(key=lambda x: (x['user_count'], x['op_count']), reverse=True)
+        else:
+            # 按意见数降序 -> 用户数降序
+            group_list.sort(key=lambda x: (x['op_count'], x['user_count']), reverse=True)
+            
+        # 3. 构建Sheet Data
+        celldata = []
         
         # 表头
-        headers = ['问题概括', '用户情绪', '数量', '占比']
-        for col_idx, header in enumerate(headers):
-            cells.append({
-                'r': current_row,
-                'c': col_idx,
+        headers = ['问题概括', '用户情绪', '意见数量', '意见占比', '用户数量', '用户占比', 'VOC原声片段']
+        for i, header in enumerate(headers):
+            celldata.append({
+                'r': 0,
+                'c': i,
                 'v': {
                     'v': header,
                     'm': header,
-                    'ct': {'fa': 'General', 't': 'g'}
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'bg': '#EDEBE9',
+                    'bl': 1
                 }
             })
-        current_row += 1
-        
-        # 统计每个分类的数据
-        summary_stats = {}
-        for key, category_info in categorized_data.items():
-            summary = category_info['summary']
-            sentiment = category_info['sentiment']
-            count = len(category_info['rows'])
             
-            # 按分类和情感统计
-            if summary not in summary_stats:
-                summary_stats[summary] = {}
-            if sentiment not in summary_stats[summary]:
-                summary_stats[summary][sentiment] = 0
-            summary_stats[summary][sentiment] += count
+        current_row = 1
+        config = {'merge': {}, 'columnlen': {}}
         
-        # 按分类名称排序
-        for summary in sorted(summary_stats.keys()):
-            for sentiment in sorted(summary_stats[summary].keys()):
-                count = summary_stats[summary][sentiment]
-                percentage = (count / total_rows * 100) if total_rows > 0 else 0
-                
-                # 问题概括
-                cells.append({
+        # 填充数据
+        for group in group_list:
+            start_row = current_row
+            rows_count = len(group['opinions'])
+            
+            # 这里如果不按照 opinion 粒度展示每一行，而是只要一行统计？
+            # 用户要求："读取单元格的内容，给拆分成五条... 归类到sheet1"
+            # 意味着每一条拆分出来的意见都要展示。
+            
+            for op in group['opinions']:
+                # Last Column: Snippet
+                celldata.append({
                     'r': current_row,
-                    'c': 0,
+                    'c': 6,
                     'v': {
-                        'v': summary,
-                        'm': summary,
+                        'v': op['snippet'],
+                        'm': str(op['snippet']),
                         'ct': {'fa': 'General', 't': 'g'}
                     }
                 })
-                
-                # 情感
-                cells.append({
-                    'r': current_row,
-                    'c': 1,
-                    'v': {
-                        'v': sentiment,
-                        'm': sentiment,
-                        'ct': {'fa': 'General', 't': 'g'}
-                    }
-                })
-                
-                # 数量
-                cells.append({
-                    'r': current_row,
-                    'c': 2,
-                    'v': {
-                        'v': count,
-                        'm': str(count),
-                        'ct': {'fa': 'General', 't': 'n'}
-                    }
-                })
-                
-                # 占比（百分比）
-                cells.append({
-                    'r': current_row,
-                    'c': 3,
-                    'v': {
-                        'v': percentage,
-                        'm': f'{percentage:.2f}%',
-                        'ct': {'fa': '0.00%', 't': 'n'}
-                    }
-                })
-                
                 current_row += 1
+                
+            # 填充统计列（在起始行）
+            # Summary (0)
+            celldata.append({
+                'r': start_row,
+                'c': 0,
+                'v': {
+                    'v': group['summary'],
+                    'm': group['summary'],
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'vt': 1, 'ht': 1,
+                    'bg': '#E6F2FF'
+                }
+            })
+            # Sentiment (1)
+            sentiment_val = group['sentiment']
+            # 默认黑色
+            font_color = '#000000'
+            if '负面' in str(sentiment_val):
+                font_color = '#FF0000' # 红色
+            elif '正面' in str(sentiment_val):
+                font_color = '#008000' # 绿色
+                
+            celldata.append({
+                'r': start_row,
+                'c': 1,
+                'v': {
+                    'v': sentiment_val,
+                    'm': sentiment_val,
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'vt': 1, 'ht': 1,
+                    'fc': font_color
+                }
+            })
+            # Op Count (2)
+            celldata.append({
+                'r': start_row,
+                'c': 2,
+                'v': {
+                    'v': group['op_count'],
+                    'm': str(group['op_count']),
+                    'ct': {'fa': 'General', 't': 'n'},
+                    'vt': 1, 'ht': 1
+                }
+            })
+            # Op Pct (3)
+            celldata.append({
+                'r': start_row,
+                'c': 3,
+                'v': {
+                    'v': f"{group['op_pct']*100:.2f}%",
+                    'm': f"{group['op_pct']*100:.2f}%",
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'vt': 1, 'ht': 1
+                }
+            })
+            # User Count (4)
+            celldata.append({
+                'r': start_row,
+                'c': 4,
+                'v': {
+                    'v': group['user_count'],
+                    'm': str(group['user_count']),
+                    'ct': {'fa': 'General', 't': 'n'},
+                    'vt': 1, 'ht': 1
+                }
+            })
+            # User Pct (5)
+            celldata.append({
+                'r': start_row,
+                'c': 5,
+                'v': {
+                    'v': f"{group['user_pct']*100:.2f}%",
+                    'm': f"{group['user_pct']*100:.2f}%",
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'vt': 1, 'ht': 1
+                }
+            })
+            
+            # 合并单元格 (Cols 0-5)
+            if rows_count > 1:
+                for col_idx in range(6):
+                    config['merge'][f"{start_row}_{col_idx}"] = {
+                        "r": start_row,
+                        "c": col_idx,
+                        "rs": rows_count,
+                        "cs": 1
+                    }
         
-        # 添加总计行
-        total_count = sum(len(info['rows']) for info in categorized_data.values())
-        cells.append({
-            'r': current_row,
-            'c': 0,
-            'v': {
-                'v': '总计',
-                'm': '总计',
-                'ct': {'fa': 'General', 't': 'g'}
-            }
-        })
-        cells.append({
-            'r': current_row,
-            'c': 1,
-            'v': {
-                'v': '-',
-                'm': '-',
-                'ct': {'fa': 'General', 't': 'g'}
-            }
-        })
-        cells.append({
-            'r': current_row,
-            'c': 2,
-            'v': {
-                'v': total_count,
-                'm': str(total_count),
-                'ct': {'fa': 'General', 't': 'n'}
-            }
-        })
-        cells.append({
-            'r': current_row,
-            'c': 3,
-            'v': {
-                'v': 100.0,
-                'm': '100.00%',
-                'ct': {'fa': '0.00%', 't': 'n'}
-            }
-        })
-        
-        # 设置列宽
-        column = {
-            "0": 120,  # 分类
-            "1": 80,   # 情感
-            "2": 80,   # 数量
-            "3": 100   # 占比
+        # 列宽
+        config['columnlen'] = {
+            '0': 200, '1': 100, 
+            '2': 70, '3': 70, 
+            '4': 70, '5': 70,
+            '6': 500
         }
         
         return {
-            'name': sheet_name,
-            'index': index,
-            'order': index,
-            'status': 1,
-            'celldata': cells,
-            'config': {
-                'columnlen': column,
-                'rowlen': {}
-            },
-            'scrollLeft': 0,
-            'scrollTop': 0,
-            'luckysheet_select_save': [],
-            'calc chain': [],
-            'isPivotTable': False,
-            'pivotTable': {},
-            'filter_select': None,
-            'filter': None,
-            'luckysheet_conditionformat_save': [],
-            'frozen': {},
-            'chart': [],
-            'zoomRatio': 1,
-            'image': [],
-            'showGridLines': 1,
-            'dataVerification': {}
+            "name": sheet_name,
+            "status": 1 if sort_by == 'opinion' else 0, # Opinion sheet active by default
+            "celldata": celldata,
+            "config": config
         }
-    
 
+    def create_sheet_data(self, ws, sheet_name, sheet_idx):
+        """将Worksheet转换为Luckysheet格式的数据"""
+        celldata = []
+        max_row = ws.max_row
+        max_col = ws.max_column
+        
+        # 读取所有单元格
+        for row in range(1, max_row + 1):
+            for col in range(1, max_col + 1):
+                cell = ws.cell(row=row, column=col)
+                if cell.value is not None:
+                    cell_value = str(cell.value)
+                    celldata.append({
+                        "r": row - 1,
+                        "c": col - 1,
+                        "v": {
+                            "v": cell_value,
+                            "m": cell_value,
+                            "ct": {"fa": "General", "t": "g"}
+                        }
+                    })
+        
+        return {
+            "name": sheet_name,
+            "index": str(sheet_idx),
+            "order": sheet_idx,
+            "status": 1 if sheet_idx == 0 else 0,
+            "celldata": celldata
+        }
+
+    def analyze_file(self, filepath):
+        """分析文件的主入口"""
+        # 读取文件
+        try:
+            print(f"[Analyze] Reading file: {filepath}")
+            if filepath.endswith('.csv'):
+                df = pd.read_csv(filepath)
+            else:
+                df = pd.read_excel(filepath)
+            
+            columns = df.columns.tolist()
+            
+            # 智能识别反馈列
+            feedback_col = None
+            
+            # 1. 关键词匹配 (优先级最高)
+            keywords = ['feedback', 'comment', 'content', 'voice', 'opinion', '建议', '反馈', '意见', '原声', '内容', '评价']
+            for col in columns:
+                if any(k in str(col).lower() for k in keywords):
+                    feedback_col = col
+                    print(f"[Analyze] Automatically detected feedback column by keyword: {feedback_col}")
+                    break
+            
+            # 2. 如果没找到，使用内容平均长度判断 (语意理解：意见通常比分类更长)
+            if not feedback_col:
+                max_avg_len = 0
+                best_col = columns[0]
+                
+                for col in columns:
+                    # 获取该列前10行的非空文本
+                    sample_texts = [str(x) for x in df[col].head(10).tolist() if pd.notna(x)]
+                    if not sample_texts:
+                        continue
+                        
+                    avg_len = sum(len(t) for t in sample_texts) / len(sample_texts)
+                    
+                    # 排除可能是ID或日期的列 (太短或特定格式，这里主要靠长度区分)
+                    if avg_len > max_avg_len:
+                        max_avg_len = avg_len
+                        best_col = col
+                
+                feedback_col = best_col
+                print(f"[Analyze] Automatically detected feedback column by length: {feedback_col} (Avg Len: {max_avg_len:.1f})")
+
+            print(f"[Analyze] Using column '{feedback_col}' as feedback source.")
+            rows = df.to_dict('records')
+            total_users = len(rows) # 假设每一行是一个用户
+            
+            # 1. 分析并获取扁平化数据
+            all_opinions = self.analyze_and_categorize(rows, feedback_col)
+            
+            sheets_data = []
+            
+            # 添加原始数据Sheet
+            # 为了保持兼容性，我们利用 openpyxl 读取一次生成原始 sheet data
+            import openpyxl
+            from openpyxl.utils import get_column_letter
+            wb = openpyxl.load_workbook(filepath)
+            ws = wb.active
+            original_sheet = self.create_sheet_data(ws, "原始数据", 0)
+            sheets_data.append(original_sheet)
+
+            # 2. 生成 Sheet 1: 按意见数排序
+            sheet_op = self.generate_analysis_sheet(all_opinions, total_users, "按意见数量排序", 'opinion')
+            sheet_op['index'] = 1
+            sheet_op['order'] = 1
+            sheets_data.append(sheet_op)
+            
+            # 3. 生成 Sheet 2: 按用户数排序
+            sheet_user = self.generate_analysis_sheet(all_opinions, total_users, "按用户数量排序", 'user')
+            sheet_user['index'] = 2
+            sheet_user['order'] = 2
+            sheets_data.append(sheet_user)
+            
+            return sheets_data
+            
+        except Exception as e:
+            print(f"[Analyze] Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
