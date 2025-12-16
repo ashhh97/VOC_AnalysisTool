@@ -6,7 +6,7 @@ import './SpreadsheetEditor.css'
 // 简单的防抖控制
 // (Moving ref inside component)
 
-function SpreadsheetEditor({ data }) {
+function SpreadsheetEditor({ data, onRecalculate }) {
   // console.log('[SpreadsheetEditor] 收到数据:', data)
 
   if (!data || !data.sheets || data.sheets.length === 0) {
@@ -15,6 +15,21 @@ function SpreadsheetEditor({ data }) {
 
   // 简单的防抖控制
   const lastLogRef = React.useRef({ time: 0, r: -1 })
+
+  const handleRecalculateClick = () => {
+    if (!onRecalculate) return
+
+    // 提取当前表格数据
+    // 假设分析结果在第二个sheet
+    const analysisSheet = data.sheets.find(s => s.name === '分析结果')
+    if (!analysisSheet) {
+      console.error('[Recalculate] Analysis sheet not found')
+      return
+    }
+
+    console.log('[Recalculate] Extracting data from sheet:', analysisSheet.name)
+    onRecalculate(analysisSheet.celldata)
+  }
 
   const handleOp = (op) => {
     // console.log('[SpreadsheetEditor] Operation:', op)
@@ -83,6 +98,27 @@ function SpreadsheetEditor({ data }) {
 
   return (
     <div className="spreadsheet-container">
+      {onRecalculate && (
+        <div style={{ padding: '10px', background: '#f5f5f5', borderBottom: '1px solid #ddd' }}>
+          <button
+            onClick={handleRecalculateClick}
+            style={{
+              padding: '8px 16px',
+              background: '#667eea',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '14px'
+            }}
+          >
+            📊 重新计算统计
+          </button>
+          <span style={{ marginLeft: '10px', color: '#666', fontSize: '12px' }}>
+            手动调整分类后，点击此按钮重新计算用户数量和占比
+          </span>
+        </div>
+      )}
       <Workbook
         key={data.fileId + '-' + data.sheets.length}
         data={data.sheets}

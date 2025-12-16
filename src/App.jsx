@@ -281,6 +281,59 @@ function App() {
     })
   }
 
+  const handleRecalculate = async (currentData) => {
+    try {
+      console.log('[Recalculate] Sending data to backend...', currentData)
+      const response = await fetch('/api/recalculate_stats', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ celldata: currentData })
+      })
+
+      if (!response.ok) {
+        throw new Error(`重新计算失败: ${response.status}`)
+      }
+
+      const result = await response.json()
+      console.log('[Recalculate] Received result:', result)
+
+      // 更新当前sheet的数据
+      if (fileData && fileData.sheets) {
+        const updatedSheets = fileData.sheets.map((sheet, index) => {
+          if (sheet.name === '分析结果') {
+            // 完全替换分析结果sheet，保持其他属性
+            return {
+              name: result.name || '分析结果',
+              index: sheet.index,
+              order: sheet.order,
+              status: 1,  // 强制设置为活动状态
+              celldata: result.celldata,
+              config: result.config,
+              scrollLeft: 0,
+              scrollTop: 0
+            }
+          } else {
+            // 其他sheet设置为非活动状态
+            return { ...sheet, status: 0 }
+          }
+        })
+
+        // 强制更新：添加时间戳到 fileId 来触发 Workbook 的 key 变化
+        setFileData({
+          ...fileData,
+          sheets: updatedSheets,
+          fileId: fileData.fileId.split('-')[0] + '-' + Date.now()  // 强制重新渲染
+        })
+        console.log('[Recalculate] Updated sheet data')
+      }
+    } catch (error) {
+      console.error('[Recalculate] Error:', error)
+      setErrorMessage(error.message || '重新计算统计失败')
+    }
+  }
+
   return (
     <div className="app">
       <header className="app-header">
@@ -401,7 +454,7 @@ function App() {
                 </button>
               </div>
             )}
-            <SpreadsheetEditor data={fileData} />
+            <SpreadsheetEditor data={fileData} onRecalculate={handleRecalculate} />
           </div>
         )}
       </main>

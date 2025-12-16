@@ -43,6 +43,195 @@ def log_feedback():
         print(f"[Feedback] Error logging feedback: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/recalculate_stats', methods=['POST'])
+def recalculate_stats():
+    """重新计算统计数据（用户手动归类后调用）"""
+    try:
+        data = request.json
+        if not data or 'celldata' not in data:
+            return jsonify({'error': 'No celldata provided'}), 400
+            
+        celldata = data['celldata']
+        print(f"[Recalculate] Received {len(celldata)} cells")
+        
+        # 解析表格数据
+        # 假设格式: 行0是表头, 列0=问题概括, 列1=用户情绪, 列2=VOC原声
+        rows_data = {}
+        for cell in celldata:
+            r, c = cell['r'], cell['c']
+            if r == 0:  # 跳过表头
+                continue
+            if r not in rows_data:
+                rows_data[r] = {}
+            rows_data[r][c] = cell['v']['v']
+        
+        # 统计: 按(问题概括, 用户情绪)分组
+        groups = {}
+        total_rows = len(rows_data)
+        
+        for row_idx, row in rows_data.items():
+            summary = row.get(0, '未分类')
+            sentiment = row.get(1, '中性😐')
+            snippet = row.get(2, '')
+            
+            key = (summary, sentiment)
+            if key not in groups:
+                groups[key] = {
+                    'summary': summary,
+                    'sentiment': sentiment,
+                    'user_count': 0,
+                    'snippets': []
+                }
+            groups[key]['user_count'] += 1
+            groups[key]['snippets'].append(snippet)
+        
+        # 计算百分比并排序
+        result_list = []
+        for key, group in groups.items():
+            user_pct = (group['user_count'] / total_rows * 100) if total_rows > 0 else 0
+            result_list.append({
+                'summary': group['summary'],
+                'sentiment': group['sentiment'],
+                'user_count': group['user_count'],
+                'user_pct': f"{user_pct:.2f}%",
+                'snippets': group['snippets']
+            })
+        
+        # 按用户数量降序排序
+        result_list.sort(key=lambda x: x['user_count'], reverse=True)
+        
+        # 构建新的celldata（带统计列）
+        new_celldata = []
+        
+        # 表头
+        headers = ['问题概括', '用户情绪', '用户数量', '用户占比', 'VOC原声片段']
+        for i, header in enumerate(headers):
+            new_celldata.append({
+                'r': 0,
+                'c': i,
+                'v': {
+                    'v': header,
+                    'm': header,
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'bg': '#EDEBE9',
+                    'bl': 1
+                }
+            })
+        
+        current_row = 1
+        merge_config = {}
+        
+        # 填充数据
+        for group in result_list:
+            start_row = current_row
+            rows_count = len(group['snippets'])
+            
+            # 每个snippet一行
+            for snippet in group['snippets']:
+                new_celldata.append({
+                    'r': current_row,
+                    'c': 4,  # VOC原声片段
+                    'v': {
+                        'v': snippet,
+                        'm': str(snippet),
+                        'ct': {'fa': 'General', 't': 'g'}
+                    }
+                })
+                current_row += 1
+            
+            # 统计列（合并单元格）
+            # 问题概括
+            new_celldata.append({
+                'r': start_row,
+                'c': 0,
+                'v': {
+                    'v': group['summary'],
+                    'm': group['summary'],
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'vt': 1, 'ht': 1,
+                    'bg': '#E6F2FF'
+                }
+            })
+            
+            # 用户情绪（带颜色）
+            font_color = '#000000'
+            if '负面' in str(group['sentiment']):
+                font_color = '#FF0000'
+            elif '正面' in str(group['sentiment']):
+                font_color = '#008000'
+                
+            new_celldata.append({
+                'r': start_row,
+                'c': 1,
+                'v': {
+                    'v': group['sentiment'],
+                    'm': group['sentiment'],
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'vt': 1, 'ht': 1,
+                    'fc': font_color
+                }
+            })
+            
+            # 用户数量
+            new_celldata.append({
+                'r': start_row,
+                'c': 2,
+                'v': {
+                    'v': group['user_count'],
+                    'm': str(group['user_count']),
+                    'ct': {'fa': 'General', 't': 'n'},
+                    'vt': 1, 'ht': 1
+                }
+            })
+            
+            # 用户占比
+            new_celldata.append({
+                'r': start_row,
+                'c': 3,
+                'v': {
+                    'v': group['user_pct'],
+                    'm': group['user_pct'],
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'vt': 1, 'ht': 1
+                }
+            })
+            
+            # 合并单元格配置
+            if rows_count > 1:
+                for col_idx in range(4):
+                    merge_config[f"{start_row}_{col_idx}"] = {
+                        "r": start_row,
+                        "c": col_idx,
+                        "rs": rows_count,
+                        "cs": 1
+                    }
+        
+        result = {
+            'name': '分析结果',
+            'status': 1,  # 设置为活动sheet
+            'celldata': new_celldata,
+            'config': {
+                'merge': merge_config,
+                'columnlen': {
+                    '0': 200,  # 问题概括
+                    '1': 100,  # 用户情绪
+                    '2': 70,   # 用户数量
+                    '3': 70,   # 用户占比
+                    '4': 500   # VOC原声片段
+                }
+            }
+        }
+        
+        print(f"[Recalculate] Generated {len(new_celldata)} cells with {len(result_list)} groups")
+        return jsonify(result), 200
+        
+    except Exception as e:
+        print(f"[Recalculate] Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:

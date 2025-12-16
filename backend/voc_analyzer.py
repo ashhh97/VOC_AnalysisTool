@@ -485,58 +485,15 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
                 
         return all_opinions
 
-    def generate_analysis_sheet(self, all_opinions, total_users, sheet_name, sort_by='opinion'):
-        """生成分析Sheet (通用方法)
-        sort_by: 'opinion' (按意见数排序) or 'user' (按用户数排序)
+    def generate_analysis_sheet(self, all_opinions, total_users, sheet_name, sort_by='user'):
+        """生成简化的分析Sheet (仅3列，无统计)
+        用户手动归类后，通过前端按钮触发重新计算统计
         """
-        print(f"[Sheet] Generating sheet: {sheet_name}, sort_by={sort_by}")
-        
-        total_opinions = len(all_opinions)
-        
-        # 1. 分组统计
-        # Key: (Summary, Sentiment)
-        groups = {}
-        
-        for op in all_opinions:
-            key = (op['summary'], op['sentiment'])
-            if key not in groups:
-                groups[key] = {
-                    'summary': op['summary'],
-                    'sentiment': op['sentiment'],
-                    'opinions': [],
-                    'user_ids': set()
-                }
-            groups[key]['opinions'].append(op)
-            groups[key]['user_ids'].add(op['row_id'])
-            
-        # 2. 转换为列表并排序
-        group_list = []
-        for key, data in groups.items():
-            op_count = len(data['opinions'])
-            user_count = len(data['user_ids'])
-            group_list.append({
-                'summary': data['summary'],
-                'sentiment': data['sentiment'],
-                'opinions': data['opinions'],
-                'op_count': op_count,
-                'op_pct': op_count / total_opinions if total_opinions > 0 else 0,
-                'user_count': user_count,
-                'user_pct': user_count / total_users if total_users > 0 else 0
-            })
-            
-        # 排序逻辑
-        if sort_by == 'user':
-            # 按用户数降序 -> 意见数降序
-            group_list.sort(key=lambda x: (x['user_count'], x['op_count']), reverse=True)
-        else:
-            # 按意见数降序 -> 用户数降序
-            group_list.sort(key=lambda x: (x['op_count'], x['user_count']), reverse=True)
-            
-        # 3. 构建Sheet Data
+        # 构建Sheet Data - 简化版本，只有3列
         celldata = []
         
-        # 表头
-        headers = ['问题概括', '用户情绪', '意见数量', '意见占比', '用户数量', '用户占比', 'VOC原声片段']
+        # 表头 (只保留3列)
+        headers = ['问题概括', '用户情绪', 'VOC原声片段']
         for i, header in enumerate(headers):
             celldata.append({
                 'r': 0,
@@ -553,127 +510,61 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
         current_row = 1
         config = {'merge': {}, 'columnlen': {}}
         
-        # 填充数据
-        for group in group_list:
-            start_row = current_row
-            rows_count = len(group['opinions'])
-            
-            # 这里如果不按照 opinion 粒度展示每一行，而是只要一行统计？
-            # 用户要求："读取单元格的内容，给拆分成五条... 归类到sheet1"
-            # 意味着每一条拆分出来的意见都要展示。
-            
-            for op in group['opinions']:
-                # Last Column: Snippet
-                celldata.append({
-                    'r': current_row,
-                    'c': 6,
-                    'v': {
-                        'v': op['snippet'],
-                        'm': str(op['snippet']),
-                        'ct': {'fa': 'General', 't': 'g'}
-                    }
-                })
-                current_row += 1
-                
-            # 填充统计列（在起始行）
-            # Summary (0)
+        # 填充数据 - 每个opinion一行，不做分组统计
+        for op in all_opinions:
+            # Column 0: 问题概括
             celldata.append({
-                'r': start_row,
+                'r': current_row,
                 'c': 0,
                 'v': {
-                    'v': group['summary'],
-                    'm': group['summary'],
-                    'ct': {'fa': 'General', 't': 'g'},
-                    'vt': 1, 'ht': 1,
-                    'bg': '#E6F2FF'
+                    'v': op['summary'],
+                    'm': op['summary'],
+                    'ct': {'fa': 'General', 't': 'g'}
                 }
             })
-            # Sentiment (1)
-            sentiment_val = group['sentiment']
-            # 默认黑色
+            
+            # Column 1: 用户情绪 (带颜色)
+            sentiment_val = op['sentiment']
             font_color = '#000000'
             if '负面' in str(sentiment_val):
-                font_color = '#FF0000' # 红色
+                font_color = '#FF0000'
             elif '正面' in str(sentiment_val):
-                font_color = '#008000' # 绿色
+                font_color = '#008000'
                 
             celldata.append({
-                'r': start_row,
+                'r': current_row,
                 'c': 1,
                 'v': {
                     'v': sentiment_val,
                     'm': sentiment_val,
                     'ct': {'fa': 'General', 't': 'g'},
-                    'vt': 1, 'ht': 1,
                     'fc': font_color
                 }
             })
-            # Op Count (2)
+            
+            # Column 2: VOC原声片段
             celldata.append({
-                'r': start_row,
+                'r': current_row,
                 'c': 2,
                 'v': {
-                    'v': group['op_count'],
-                    'm': str(group['op_count']),
-                    'ct': {'fa': 'General', 't': 'n'},
-                    'vt': 1, 'ht': 1
-                }
-            })
-            # Op Pct (3)
-            celldata.append({
-                'r': start_row,
-                'c': 3,
-                'v': {
-                    'v': f"{group['op_pct']*100:.2f}%",
-                    'm': f"{group['op_pct']*100:.2f}%",
-                    'ct': {'fa': 'General', 't': 'g'},
-                    'vt': 1, 'ht': 1
-                }
-            })
-            # User Count (4)
-            celldata.append({
-                'r': start_row,
-                'c': 4,
-                'v': {
-                    'v': group['user_count'],
-                    'm': str(group['user_count']),
-                    'ct': {'fa': 'General', 't': 'n'},
-                    'vt': 1, 'ht': 1
-                }
-            })
-            # User Pct (5)
-            celldata.append({
-                'r': start_row,
-                'c': 5,
-                'v': {
-                    'v': f"{group['user_pct']*100:.2f}%",
-                    'm': f"{group['user_pct']*100:.2f}%",
-                    'ct': {'fa': 'General', 't': 'g'},
-                    'vt': 1, 'ht': 1
+                    'v': op['snippet'],
+                    'm': str(op['snippet']),
+                    'ct': {'fa': 'General', 't': 'g'}
                 }
             })
             
-            # 合并单元格 (Cols 0-5)
-            if rows_count > 1:
-                for col_idx in range(6):
-                    config['merge'][f"{start_row}_{col_idx}"] = {
-                        "r": start_row,
-                        "c": col_idx,
-                        "rs": rows_count,
-                        "cs": 1
-                    }
+            current_row += 1
         
         # 列宽
         config['columnlen'] = {
-            '0': 200, '1': 100, 
-            '2': 70, '3': 70, 
-            '4': 70, '5': 70,
-            '6': 500
+            '0': 200,  # 问题概括
+            '1': 100,  # 用户情绪
+            '2': 500   # VOC原声片段
         }
         
         return {
             "name": sheet_name,
-            "status": 1 if sort_by == 'opinion' else 0, # Opinion sheet active by default
+            "status": 1 if sort_by == 'user' else 0,
             "celldata": celldata,
             "config": config
         }
