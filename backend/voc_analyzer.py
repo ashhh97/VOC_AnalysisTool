@@ -770,16 +770,11 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
             original_sheet = self.create_sheet_data(ws, "原始数据", 0)
             sheets_data.append(original_sheet)
 
-            # 2. 生成 Sheet 1: 按意见数排序
-            sheet_op = self.generate_analysis_sheet(all_opinions, total_users, "按意见数量排序", 'opinion')
-            sheet_op['index'] = 1
-            sheet_op['order'] = 1
-            sheets_data.append(sheet_op)
-            
-            # 3. 生成 Sheet 2: 按用户数排序
-            sheet_user = self.generate_analysis_sheet(all_opinions, total_users, "按用户数量排序", 'user')
-            sheet_user['index'] = 2
-            sheet_user['order'] = 2
+            # 生成分析结果 Sheet: 按用户数排序
+            sheet_user = self.generate_analysis_sheet(all_opinions, total_users, "分析结果", 'user')
+            sheet_user['index'] = 1
+            sheet_user['order'] = 1
+            sheet_user['status'] = 1  # 设置为活动sheet
             sheets_data.append(sheet_user)
             
             return sheets_data
