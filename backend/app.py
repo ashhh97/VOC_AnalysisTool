@@ -19,6 +19,21 @@ UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
+import math
+
+# 工具函数：清理JSON数据中的无效值
+def clean_json_data(data):
+    if isinstance(data, dict):
+        return {k: clean_json_data(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [clean_json_data(v) for v in data]
+    elif isinstance(data, float):
+        if math.isnan(data) or math.isinf(data):
+            return ""
+        return data
+    else:
+        return data
+
 analyzer = VOCAnalyzer()
 
 # 用于跟踪分析任务的状态
@@ -55,24 +70,43 @@ def recalculate_stats():
         print(f"[Recalculate] Received {len(celldata)} cells")
         
         # 解析表格数据
-        # 假设格式: 行0是表头, 列0=问题概括, 列1=用户情绪, 列2=VOC原声
+        # 假设格式: 行0是表头, 列0=问题概括, 列1=用户情绪, 列2+=其他数据
         rows_data = {}
-        for cell in celldata:
-            r, c = cell['r'], cell['c']
-            if r == 0:  # 跳过表头
-                continue
-            if r not in rows_data:
-                rows_data[r] = {}
-            rows_data[r][c] = cell['v']['v']
+        headers = {}
+        max_col = 0
         
+        for cell in celldata:
+            r, c = cell['r'], int(cell['c'])
+            v = cell['v'].get('v', '') if isinstance(cell['v'], dict) else cell['v']
+            
+            if r == 0:
+                headers[c] = v
+                max_col = max(max_col, c)
+            else:
+                if r not in rows_data:
+                    rows_data[r] = {}
+                rows_data[r][c] = v
+
+        # 提取动态列名 (从索引2开始)
+        original_data_headers = []
+        for c in range(2, max_col + 1):
+            if c in headers:
+                original_data_headers.append(headers[c])
+        
+        print(f"[Recalculate] Detected {len(original_data_headers)} data columns: {original_data_headers}")
+
         # 统计: 按(问题概括, 用户情绪)分组
         groups = {}
-        total_rows = len(rows_data)
+        total_real_rows = len(rows_data)
         
         for row_idx, row in rows_data.items():
             summary = row.get(0, '未分类')
             sentiment = row.get(1, '中性😐')
-            snippet = row.get(2, '')
+            
+            # 收集该行所有其他列的数据
+            row_extra_data = []
+            for c in range(2, max_col + 1):
+                row_extra_data.append(row.get(c, ''))
             
             key = (summary, sentiment)
             if key not in groups:
@@ -80,21 +114,21 @@ def recalculate_stats():
                     'summary': summary,
                     'sentiment': sentiment,
                     'user_count': 0,
-                    'snippets': []
+                    'data_rows': []
                 }
             groups[key]['user_count'] += 1
-            groups[key]['snippets'].append(snippet)
+            groups[key]['data_rows'].append(row_extra_data)
         
         # 计算百分比并排序
         result_list = []
         for key, group in groups.items():
-            user_pct = (group['user_count'] / total_rows * 100) if total_rows > 0 else 0
+            user_pct = (group['user_count'] / total_real_rows * 100) if total_real_rows > 0 else 0
             result_list.append({
                 'summary': group['summary'],
                 'sentiment': group['sentiment'],
                 'user_count': group['user_count'],
                 'user_pct': f"{user_pct:.2f}%",
-                'snippets': group['snippets']
+                'data_rows': group['data_rows']
             })
         
         # 按用户数量降序排序
@@ -103,9 +137,10 @@ def recalculate_stats():
         # 构建新的celldata（带统计列）
         new_celldata = []
         
-        # 表头
-        headers = ['问题概括', '用户情绪', '用户数量', '用户占比', 'VOC原声片段']
-        for i, header in enumerate(headers):
+        # 新表头: [问题概括, 用户情绪, 用户数量, 用户占比] + [原始数据列...]
+        new_headers = ['问题概括', '用户情绪', '用户数量', '用户占比'] + original_data_headers
+        
+        for i, header in enumerate(new_headers):
             new_celldata.append({
                 'r': 0,
                 'c': i,
@@ -124,22 +159,24 @@ def recalculate_stats():
         # 填充数据
         for group in result_list:
             start_row = current_row
-            rows_count = len(group['snippets'])
+            rows_count = len(group['data_rows'])
             
-            # 每个snippet一行
-            for snippet in group['snippets']:
-                new_celldata.append({
-                    'r': current_row,
-                    'c': 4,  # VOC原声片段
-                    'v': {
-                        'v': snippet,
-                        'm': str(snippet),
-                        'ct': {'fa': 'General', 't': 'g'}
-                    }
-                })
+            # 填充具体数据行 (从列4开始)
+            for row_data in group['data_rows']:
+                for idx, val in enumerate(row_data):
+                    val_str = str(val)
+                    new_celldata.append({
+                        'r': current_row,
+                        'c': 4 + idx,  # 偏移4列 (前4列是统计)
+                        'v': {
+                            'v': val_str,
+                            'm': val_str,
+                            'ct': {'fa': 'General', 't': 'g'}
+                        }
+                    })
                 current_row += 1
             
-            # 统计列（合并单元格）
+            # 统计列（合并单元格）： 列0-3
             # 问题概括
             new_celldata.append({
                 'r': start_row,
@@ -471,7 +508,9 @@ def analyze_voc():
                     elif update_type == 'complete':
                         result = args[0]
                         print(f"[SSE] 发送完成消息，包含 {len(result.get('sheets', []))} 个sheet")
-                        yield f"data: {json.dumps({'type': 'complete', 'data': result}, ensure_ascii=False)}\n\n"
+                        # 清理数据中的NaN
+                        cleaned_result = clean_json_data(result)
+                        yield f"data: {json.dumps({'type': 'complete', 'data': cleaned_result}, ensure_ascii=False)}\n\n"
                         break
                     elif update_type == 'error':
                         error_msg = args[0]
@@ -483,7 +522,8 @@ def analyze_voc():
                         # 检查是否有结果需要发送
                         if result_container['result']:
                             print(f"[SSE] 发送结果（done消息后）")
-                            yield f"data: {json.dumps({'type': 'complete', 'data': result_container['result']}, ensure_ascii=False)}\n\n"
+                            cleaned_result = clean_json_data(result_container['result'])
+                            yield f"data: {json.dumps({'type': 'complete', 'data': cleaned_result}, ensure_ascii=False)}\n\n"
                         break
                 except queue.Empty:
                     # 队列为空，继续等待

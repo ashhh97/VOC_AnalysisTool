@@ -480,24 +480,29 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
                 'summary': first_opinion['summary'],
                 'sentiment': first_opinion['sentiment'],
                 'snippet': row_info[feedback_col], # snippet直接等于全文
-                'full_feedback': row_info[feedback_col]
+                'full_feedback': row_info[feedback_col],
+                'row_data': row_info
             })
                 
         return all_opinions
 
-    def generate_analysis_sheet(self, all_opinions, total_users, sheet_name, sort_by='user'):
-        """生成简化的分析Sheet (仅3列，无统计)
+    def generate_analysis_sheet(self, all_opinions, total_users, sheet_name, sort_by='user', original_columns=None):
+        """生成简化的分析Sheet (包含原始列)
         用户手动归类后，通过前端按钮触发重新计算统计
         """
-        # 构建Sheet Data - 简化版本，只有3列
+        if original_columns is None:
+            original_columns = []
+
+        # 构建Sheet Data
         celldata = []
         
-        # 表头 (只保留3列)
-        headers = ['问题概括', '用户情绪', 'VOC原声片段']
-        for i, header in enumerate(headers):
+        # 表头: [问题概括, 用户情绪] + 原始列
+        headers = ['问题概括', '用户情绪'] + original_columns
+        
+        for col_idx, header in enumerate(headers):
             celldata.append({
                 'r': 0,
-                'c': i,
+                'c': col_idx,
                 'v': {
                     'v': header,
                     'm': header,
@@ -511,62 +516,72 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
         config = {'merge': {}, 'columnlen': {}}
         
         # 填充数据 - 每个opinion一行，不做分组统计
-        for op in all_opinions:
-            # Column 0: 问题概括
+        for row_idx, opinion in enumerate(all_opinions):
+            current_row = row_idx + 1
+            
+            # 1. 问题概括
             celldata.append({
                 'r': current_row,
                 'c': 0,
                 'v': {
-                    'v': op['summary'],
-                    'm': op['summary'],
+                    'v': opinion['summary'],
+                    'm': opinion['summary'],
                     'ct': {'fa': 'General', 't': 'g'}
                 }
             })
             
-            # Column 1: 用户情绪 (带颜色)
-            sentiment_val = op['sentiment']
+            # 2. 用户情绪
             font_color = '#000000'
-            if '负面' in str(sentiment_val):
+            if '负面' in str(opinion['sentiment']):
                 font_color = '#FF0000'
-            elif '正面' in str(sentiment_val):
+            elif '正面' in str(opinion['sentiment']):
                 font_color = '#008000'
                 
             celldata.append({
                 'r': current_row,
                 'c': 1,
                 'v': {
-                    'v': sentiment_val,
-                    'm': sentiment_val,
+                    'v': opinion['sentiment'],
+                    'm': opinion['sentiment'],
                     'ct': {'fa': 'General', 't': 'g'},
                     'fc': font_color
                 }
             })
             
-            # Column 2: VOC原声片段
-            celldata.append({
-                'r': current_row,
-                'c': 2,
-                'v': {
-                    'v': op['snippet'],
-                    'm': str(op['snippet']),
-                    'ct': {'fa': 'General', 't': 'g'}
-                }
-            })
-            
-            current_row += 1
+            # 3. 原始列数据
+            for col_i, col_name in enumerate(original_columns):
+                # Data is at column index 2 + col_i
+                val = opinion['row_data'].get(col_name, '')
+                # 处理 NaN
+                if isinstance(val, float):
+                    import math
+                    if math.isnan(val) or math.isinf(val):
+                        val = ""
+                val_str = str(val)
+                
+                celldata.append({
+                    'r': current_row,
+                    'c': 2 + col_i,
+                    'v': {
+                        'v': val_str,
+                        'm': val_str,
+                        'ct': {'fa': 'General', 't': 'g'}
+                    }
+                })
         
-        # 列宽
-        config['columnlen'] = {
+        # 列宽配置
+        column_len = {
             '0': 200,  # 问题概括
             '1': 100,  # 用户情绪
-            '2': 500   # VOC原声片段
         }
+        # 其他列默认宽
         
         return {
-            "name": sheet_name,
-            "status": 1 if sort_by == 'user' else 0,
-            "celldata": celldata,
-            "config": config
+            'name': sheet_name,
+            'celldata': celldata,
+            'config': {
+                'columnlen': column_len
+            }
         }
 
     def create_sheet_data(self, ws, sheet_name, sheet_idx):
@@ -580,7 +595,18 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
             for col in range(1, max_col + 1):
                 cell = ws.cell(row=row, column=col)
                 if cell.value is not None:
-                    cell_value = str(cell.value)
+                    # 处理各种类型的值，确保不会产生NaN
+                    try:
+                        raw_value = cell.value
+                        cell_value = str(raw_value)
+                        
+                        # 检查特殊值
+                        lower_val = cell_value.lower()
+                        if lower_val == 'nan' or lower_val == 'inf' or lower_val == '-inf':
+                            cell_value = ""
+                    except Exception:
+                        cell_value = ""
+                    
                     celldata.append({
                         "r": row - 1,
                         "c": col - 1,
@@ -662,7 +688,7 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
             sheets_data.append(original_sheet)
 
             # 生成分析结果 Sheet: 按用户数排序
-            sheet_user = self.generate_analysis_sheet(all_opinions, total_users, "分析结果", 'user')
+            sheet_user = self.generate_analysis_sheet(all_opinions, total_users, "分析结果", 'user', original_columns=columns)
             sheet_user['index'] = 1
             sheet_user['order'] = 1
             sheet_user['status'] = 1  # 设置为活动sheet
