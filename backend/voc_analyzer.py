@@ -487,18 +487,41 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
         return all_opinions
 
     def generate_analysis_sheet(self, all_opinions, total_users, sheet_name, sort_by='user', original_columns=None):
-        """生成简化的分析Sheet (包含原始列)
-        用户手动归类后，通过前端按钮触发重新计算统计
+        """生成归类后的分析Sheet (包含原始列)
+        - 将同类VOC行放在一起，并为分组创建合并的总问题标题
+        - 功能/体验等分类单独放一列，不与问题标题混在一起
         """
         if original_columns is None:
             original_columns = []
 
+        # 先按“问题标题”分组，保持出现顺序
+        grouped = []
+        group_map = {}
+
+        def split_summary(summary_text):
+            """拆分分类：前半部分为归类（功能/体验），后半部分为总问题标题"""
+            if not summary_text:
+                return "其他问题", ""
+            text = str(summary_text).strip()
+            parts = [p.strip() for p in re.split(r'[-—]', text, maxsplit=1)]
+            if len(parts) == 2 and parts[0] and parts[1]:
+                return parts[1], parts[0]  # (问题标题, 问题归类)
+            return text, ""  # 没有明确归类时，整句作为标题
+
+        for opinion in all_opinions:
+            title, category = split_summary(opinion.get('summary'))
+            key = (title, category)
+            if key not in group_map:
+                group_map[key] = []
+                grouped.append((key, group_map[key]))
+            group_map[key].append({**opinion, 'title': title, 'category': category})
+
         # 构建Sheet Data
         celldata = []
-        
-        # 表头: [问题概括, 用户情绪] + 原始列
-        headers = ['问题概括', '用户情绪'] + original_columns
-        
+
+        # 表头: [问题总标题, 问题归类, 用户情绪] + 原始列
+        headers = ['问题总标题', '问题归类', '用户情绪'] + original_columns
+
         for col_idx, header in enumerate(headers):
             celldata.append({
                 'r': 0,
@@ -511,75 +534,112 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
                     'bl': 1
                 }
             })
-            
+
         current_row = 1
         config = {'merge': {}, 'columnlen': {}}
-        
-        # 填充数据 - 每个opinion一行，不做分组统计
-        for row_idx, opinion in enumerate(all_opinions):
-            current_row = row_idx + 1
-            
-            # 1. 问题概括
-            celldata.append({
-                'r': current_row,
-                'c': 0,
-                'v': {
-                    'v': opinion['summary'],
-                    'm': opinion['summary'],
-                    'ct': {'fa': 'General', 't': 'g'}
-                }
-            })
-            
-            # 2. 用户情绪
-            font_color = '#000000'
-            if '负面' in str(opinion['sentiment']):
-                font_color = '#FF0000'
-            elif '正面' in str(opinion['sentiment']):
-                font_color = '#008000'
-                
-            celldata.append({
-                'r': current_row,
-                'c': 1,
-                'v': {
-                    'v': opinion['sentiment'],
-                    'm': opinion['sentiment'],
-                    'ct': {'fa': 'General', 't': 'g'},
-                    'fc': font_color
-                }
-            })
-            
-            # 3. 原始列数据
-            for col_i, col_name in enumerate(original_columns):
-                # Data is at column index 2 + col_i
-                val = opinion['row_data'].get(col_name, '')
-                # 处理 NaN
-                if isinstance(val, float):
-                    import math
-                    if math.isnan(val) or math.isinf(val):
-                        val = ""
-                val_str = str(val)
-                
+
+        # 按分组填充数据，并对分组列做合并
+        for (title, category), opinions in grouped:
+            start_row = current_row
+            group_rows = len(opinions)
+
+            for opinion in opinions:
+                row_idx = current_row
+
+                # 问题总标题（只在组首生成，之后依赖合并）
+                if row_idx == start_row:
+                    celldata.append({
+                        'r': row_idx,
+                        'c': 0,
+                        'v': {
+                            'v': title,
+                            'm': title,
+                            'ct': {'fa': 'General', 't': 'g'},
+                            'vt': 1,
+                            'ht': 1,
+                            'bg': '#F6F8FA'
+                        }
+                    })
+
+                    celldata.append({
+                        'r': row_idx,
+                        'c': 1,
+                        'v': {
+                            'v': category or '未分类',
+                            'm': category or '未分类',
+                            'ct': {'fa': 'General', 't': 'g'},
+                            'vt': 1,
+                            'ht': 1,
+                            'bg': '#F6F8FA'
+                        }
+                    })
+
+                # 用户情绪
+                font_color = '#000000'
+                if '负面' in str(opinion['sentiment']):
+                    font_color = '#FF0000'
+                elif '正面' in str(opinion['sentiment']):
+                    font_color = '#008000'
+
                 celldata.append({
-                    'r': current_row,
-                    'c': 2 + col_i,
+                    'r': row_idx,
+                    'c': 2,
                     'v': {
-                        'v': val_str,
-                        'm': val_str,
-                        'ct': {'fa': 'General', 't': 'g'}
+                        'v': opinion['sentiment'],
+                        'm': opinion['sentiment'],
+                        'ct': {'fa': 'General', 't': 'g'},
+                        'fc': font_color
                     }
                 })
-        
+
+                # 原始列数据（从列3开始）
+                for col_i, col_name in enumerate(original_columns):
+                    val = opinion['row_data'].get(col_name, '')
+                    if isinstance(val, float):
+                        import math
+                        if math.isnan(val) or math.isinf(val):
+                            val = ""
+                    val_str = str(val)
+
+                    celldata.append({
+                        'r': row_idx,
+                        'c': 3 + col_i,
+                        'v': {
+                            'v': val_str,
+                            'm': val_str,
+                            'ct': {'fa': 'General', 't': 'g'}
+                        }
+                    })
+
+                current_row += 1
+
+            # 生成合并配置（将同组的“问题总标题”和“问题归类”列合并）
+            if group_rows > 1:
+                config['merge'][f"{start_row}_0"] = {
+                    "r": start_row,
+                    "c": 0,
+                    "rs": group_rows,
+                    "cs": 1
+                }
+                config['merge'][f"{start_row}_1"] = {
+                    "r": start_row,
+                    "c": 1,
+                    "rs": group_rows,
+                    "cs": 1
+                }
+
         # 列宽配置
         column_len = {
-            '0': 200,  # 问题概括
-            '1': 100,  # 用户情绪
+            '0': 220,  # 问题总标题
+            '1': 120,  # 问题归类（功能/体验等）
+            '2': 100,  # 用户情绪
         }
-        # 其他列默认宽
-        
+
         return {
             'name': sheet_name,
             'celldata': celldata,
             'config': {
+                'merge': config.get('merge', {}),
                 'columnlen': column_len
             }
         }
@@ -625,16 +685,17 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
             "celldata": celldata
         }
 
-    def analyze_file(self, filepath):
-        """分析文件的主入口"""
-        # 读取文件
+    def analyze_dataframe(self, df, original_sheet_data=None):
+        """分析DataFrame的核心逻辑
+        
+        Args:
+            df: pandas DataFrame containing the data to analyze
+            original_sheet_data: Optional dict for original sheet (if None, will be generated from df)
+        
+        Returns:
+            list of sheet data dicts
+        """
         try:
-            print(f"[Analyze] Reading file: {filepath}")
-            if filepath.endswith('.csv'):
-                df = pd.read_csv(filepath)
-            else:
-                df = pd.read_excel(filepath)
-            
             columns = df.columns.tolist()
             
             # 智能识别反馈列
@@ -648,20 +709,18 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
                     print(f"[Analyze] Automatically detected feedback column by keyword: {feedback_col}")
                     break
             
-            # 2. 如果没找到，使用内容平均长度判断 (语意理解：意见通常比分类更长)
+            # 2. 如果没找到，使用内容平均长度判断
             if not feedback_col:
                 max_avg_len = 0
                 best_col = columns[0]
                 
                 for col in columns:
-                    # 获取该列前10行的非空文本
                     sample_texts = [str(x) for x in df[col].head(10).tolist() if pd.notna(x)]
                     if not sample_texts:
                         continue
                         
                     avg_len = sum(len(t) for t in sample_texts) / len(sample_texts)
                     
-                    # 排除可能是ID或日期的列 (太短或特定格式，这里主要靠长度区分)
                     if avg_len > max_avg_len:
                         max_avg_len = avg_len
                         best_col = col
@@ -671,30 +730,93 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
 
             print(f"[Analyze] Using column '{feedback_col}' as feedback source.")
             rows = df.to_dict('records')
-            total_users = len(rows) # 假设每一行是一个用户
+            total_users = len(rows)
             
-            # 1. 分析并获取扁平化数据
+            # 分析并获取扁平化数据
             all_opinions = self.analyze_and_categorize(rows, feedback_col)
             
             sheets_data = []
             
             # 添加原始数据Sheet
-            # 为了保持兼容性，我们利用 openpyxl 读取一次生成原始 sheet data
-            import openpyxl
-            from openpyxl.utils import get_column_letter
-            wb = openpyxl.load_workbook(filepath)
-            ws = wb.active
-            original_sheet = self.create_sheet_data(ws, "原始数据", 0)
-            sheets_data.append(original_sheet)
+            if original_sheet_data:
+                sheets_data.append(original_sheet_data)
+            else:
+                # 从DataFrame生成原始数据sheet
+                original_sheet = self._dataframe_to_sheet_data(df, "原始数据", 0)
+                sheets_data.append(original_sheet)
 
-            # 生成分析结果 Sheet: 按用户数排序
+            # 生成分析结果 Sheet
             sheet_user = self.generate_analysis_sheet(all_opinions, total_users, "分析结果", 'user', original_columns=columns)
             sheet_user['index'] = 1
             sheet_user['order'] = 1
-            sheet_user['status'] = 1  # 设置为活动sheet
+            sheet_user['status'] = 1
             sheets_data.append(sheet_user)
             
             return sheets_data
+            
+        except Exception as e:
+            print(f"[Analyze] Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _dataframe_to_sheet_data(self, df, sheet_name, sheet_idx):
+        """将DataFrame转换为sheet data格式"""
+        celldata = []
+        
+        # 表头
+        for col_idx, col_name in enumerate(df.columns):
+            celldata.append({
+                'r': 0,
+                'c': col_idx,
+                'v': {
+                    'v': str(col_name),
+                    'm': str(col_name),
+                    'ct': {'fa': 'General', 't': 'g'}
+                }
+            })
+        
+        # 数据行
+        for row_idx, row in df.iterrows():
+            for col_idx, col_name in enumerate(df.columns):
+                val = row[col_name]
+                if pd.notna(val):
+                    val_str = str(val)
+                    celldata.append({
+                        'r': row_idx + 1,
+                        'c': col_idx,
+                        'v': {
+                            'v': val_str,
+                            'm': val_str,
+                            'ct': {'fa': 'General', 't': 'g'}
+                        }
+                    })
+        
+        return {
+            'name': sheet_name,
+            'index': str(sheet_idx),
+            'order': sheet_idx,
+            'status': 1 if sheet_idx == 0 else 0,
+            'celldata': celldata
+        }
+
+    def analyze_file(self, filepath):
+        """分析文件的主入口"""
+        try:
+            print(f"[Analyze] Reading file: {filepath}")
+            if filepath.endswith('.csv'):
+                df = pd.read_csv(filepath)
+            else:
+                df = pd.read_excel(filepath)
+            
+            # 为了保持兼容性，使用 openpyxl 读取生成原始 sheet data
+            import openpyxl
+            wb = openpyxl.load_workbook(filepath)
+            ws = wb.active
+            original_sheet = self.create_sheet_data(ws, "原始数据", 0)
+            
+            # 调用核心分析逻辑
+            return self.analyze_dataframe(df, original_sheet_data=original_sheet)
             
         except Exception as e:
             print(f"[Analyze] Error: {str(e)}")

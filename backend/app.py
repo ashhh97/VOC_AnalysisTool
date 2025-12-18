@@ -36,6 +36,54 @@ def clean_json_data(data):
 
 analyzer = VOCAnalyzer()
 
+def celldata_to_dataframe(celldata):
+    """Convert FortuneSheet celldata to pandas DataFrame
+    
+    Args:
+        celldata: List of cell objects from FortuneSheet
+                  Format: [{'r': row, 'c': col, 'v': {'v': value, ...}}, ...]
+    
+    Returns:
+        pandas DataFrame
+    """
+    import pandas as pd
+    
+    # Parse celldata into rows dict
+    rows_data = {}
+    headers = {}
+    max_col = 0
+    
+    for cell in celldata:
+        r = cell['r']
+        c = int(cell['c'])
+        v = cell['v'].get('v', '') if isinstance(cell['v'], dict) else cell['v']
+        
+        if r == 0:
+            # Header row
+            headers[c] = v
+            max_col = max(max_col, c)
+        else:
+            if r not in rows_data:
+                rows_data[r] = {}
+            rows_data[r][c] = v
+    
+    # Build column names
+    columns = []
+    for c in range(max_col + 1):
+        columns.append(headers.get(c, f'Column{c}'))
+    
+    # Build data rows
+    data = []
+    for r in sorted(rows_data.keys()):
+        row = []
+        for c in range(max_col + 1):
+            row.append(rows_data[r].get(c, ''))
+        data.append(row)
+    
+    df = pd.DataFrame(data, columns=columns)
+    print(f"[celldata_to_dataframe] Created DataFrame with shape {df.shape}")
+    return df
+
 # 用于跟踪分析任务的状态
 # 用于跟踪分析任务的状态
 analysis_tasks = {}  # {file_id: {'stop_flag': threading.Event(), 'thread': thread}}
@@ -70,7 +118,7 @@ def recalculate_stats():
         print(f"[Recalculate] Received {len(celldata)} cells")
         
         # 解析表格数据
-        # 假设格式: 行0是表头, 列0=问题概括, 列1=用户情绪, 列2+=其他数据
+        # 新格式: 行0是表头, 列0=问题总标题, 列1=问题归类, 列2=用户情绪, 列3+=其他数据
         rows_data = {}
         headers = {}
         max_col = 0
@@ -87,31 +135,47 @@ def recalculate_stats():
                     rows_data[r] = {}
                 rows_data[r][c] = v
 
-        # 提取动态列名 (从索引2开始)
+        # 提取动态列名 (从索引3开始)
         original_data_headers = []
-        for c in range(2, max_col + 1):
+        for c in range(3, max_col + 1):
             if c in headers:
                 original_data_headers.append(headers[c])
         
         print(f"[Recalculate] Detected {len(original_data_headers)} data columns: {original_data_headers}")
 
-        # 统计: 按(问题概括, 用户情绪)分组
+        # 补齐合并单元格导致的空值（将上方同列值向下填充）
+        last_summary = None
+        last_category = None
+        for r in sorted(rows_data.keys()):
+            row = rows_data[r]
+            if 0 in row and row[0] != '':
+                last_summary = row[0]
+            elif last_summary is not None:
+                row[0] = last_summary
+            if 1 in row and row[1] != '':
+                last_category = row[1]
+            elif last_category is not None:
+                row[1] = last_category
+
+        # 统计: 按(问题总标题, 问题归类, 用户情绪)分组
         groups = {}
         total_real_rows = len(rows_data)
         
         for row_idx, row in rows_data.items():
-            summary = row.get(0, '未分类')
-            sentiment = row.get(1, '中性😐')
+            summary = row.get(0, '未分类') or '未分类'
+            category = row.get(1, '未归类') or '未归类'
+            sentiment = row.get(2, '中性😐') or '中性😐'
             
             # 收集该行所有其他列的数据
             row_extra_data = []
-            for c in range(2, max_col + 1):
+            for c in range(3, max_col + 1):
                 row_extra_data.append(row.get(c, ''))
             
-            key = (summary, sentiment)
+            key = (summary, category, sentiment)
             if key not in groups:
                 groups[key] = {
                     'summary': summary,
+                    'category': category,
                     'sentiment': sentiment,
                     'user_count': 0,
                     'data_rows': []
@@ -125,6 +189,7 @@ def recalculate_stats():
             user_pct = (group['user_count'] / total_real_rows * 100) if total_real_rows > 0 else 0
             result_list.append({
                 'summary': group['summary'],
+                'category': group['category'],
                 'sentiment': group['sentiment'],
                 'user_count': group['user_count'],
                 'user_pct': f"{user_pct:.2f}%",
@@ -137,8 +202,8 @@ def recalculate_stats():
         # 构建新的celldata（带统计列）
         new_celldata = []
         
-        # 新表头: [问题概括, 用户情绪, 用户数量, 用户占比] + [原始数据列...]
-        new_headers = ['问题概括', '用户情绪', '用户数量', '用户占比'] + original_data_headers
+        # 新表头: [问题总标题, 问题归类, 用户情绪, 用户数量, 用户占比] + [原始数据列...]
+        new_headers = ['问题总标题', '问题归类', '用户情绪', '用户数量', '用户占比'] + original_data_headers
         
         for i, header in enumerate(new_headers):
             new_celldata.append({
@@ -161,13 +226,13 @@ def recalculate_stats():
             start_row = current_row
             rows_count = len(group['data_rows'])
             
-            # 填充具体数据行 (从列4开始)
+            # 填充具体数据行 (从列5开始)
             for row_data in group['data_rows']:
                 for idx, val in enumerate(row_data):
                     val_str = str(val)
                     new_celldata.append({
                         'r': current_row,
-                        'c': 4 + idx,  # 偏移4列 (前4列是统计)
+                        'c': 5 + idx,  # 偏移5列 (前5列是统计)
                         'v': {
                             'v': val_str,
                             'm': val_str,
@@ -176,14 +241,27 @@ def recalculate_stats():
                     })
                 current_row += 1
             
-            # 统计列（合并单元格）： 列0-3
-            # 问题概括
+            # 统计列（合并单元格）： 列0-4
+            # 问题总标题
             new_celldata.append({
                 'r': start_row,
                 'c': 0,
                 'v': {
                     'v': group['summary'],
                     'm': group['summary'],
+                    'ct': {'fa': 'General', 't': 'g'},
+                    'vt': 1, 'ht': 1,
+                    'bg': '#E6F2FF'
+                }
+            })
+            
+            # 问题归类
+            new_celldata.append({
+                'r': start_row,
+                'c': 1,
+                'v': {
+                    'v': group['category'],
+                    'm': group['category'],
                     'ct': {'fa': 'General', 't': 'g'},
                     'vt': 1, 'ht': 1,
                     'bg': '#E6F2FF'
@@ -199,7 +277,7 @@ def recalculate_stats():
                 
             new_celldata.append({
                 'r': start_row,
-                'c': 1,
+                'c': 2,
                 'v': {
                     'v': group['sentiment'],
                     'm': group['sentiment'],
@@ -212,7 +290,7 @@ def recalculate_stats():
             # 用户数量
             new_celldata.append({
                 'r': start_row,
-                'c': 2,
+                'c': 3,
                 'v': {
                     'v': group['user_count'],
                     'm': str(group['user_count']),
@@ -224,7 +302,7 @@ def recalculate_stats():
             # 用户占比
             new_celldata.append({
                 'r': start_row,
-                'c': 3,
+                'c': 4,
                 'v': {
                     'v': group['user_pct'],
                     'm': group['user_pct'],
@@ -235,7 +313,7 @@ def recalculate_stats():
             
             # 合并单元格配置
             if rows_count > 1:
-                for col_idx in range(4):
+                for col_idx in range(5):
                     merge_config[f"{start_row}_{col_idx}"] = {
                         "r": start_row,
                         "c": col_idx,
@@ -250,11 +328,12 @@ def recalculate_stats():
             'config': {
                 'merge': merge_config,
                 'columnlen': {
-                    '0': 200,  # 问题概括
-                    '1': 100,  # 用户情绪
-                    '2': 70,   # 用户数量
-                    '3': 70,   # 用户占比
-                    '4': 500   # VOC原声片段
+                    '0': 220,  # 问题总标题
+                    '1': 120,  # 问题归类
+                    '2': 100,  # 用户情绪
+                    '3': 70,   # 用户数量
+                    '4': 70,   # 用户占比
+                    '5': 500   # VOC原声片段（默认第一列原始数据）
                 }
             }
         }
@@ -367,13 +446,19 @@ def upload_file():
 def analyze_voc():
     data = request.json
     file_id = data.get('fileId')
+    celldata = data.get('celldata')  # Optional: current sheet data
     
     if not file_id:
         return jsonify({'error': '缺少fileId'}), 400
     
-    file_path = os.path.join(UPLOAD_FOLDER, f'{file_id}.xlsx')
-    if not os.path.exists(file_path):
-        return jsonify({'error': '文件不存在'}), 404
+    # 如果提供了celldata，使用它；否则使用文件
+    use_celldata = celldata is not None and len(celldata) > 0
+    
+    if not use_celldata:
+        # 传统方式：从文件读取
+        file_path = os.path.join(UPLOAD_FOLDER, f'{file_id}.xlsx')
+        if not os.path.exists(file_path):
+            return jsonify({'error': '文件不存在'}), 404
     
     # 如果已有任务，先停止它
     if file_id in analysis_tasks:
@@ -394,7 +479,11 @@ def analyze_voc():
     
     def analyze_task(progress_queue):
         try:
-            print(f"[分析任务] 开始分析文件: {file_path}")
+            if use_celldata:
+                print(f"[分析任务] 使用celldata进行分析，共 {len(celldata)} 个单元格")
+            else:
+                print(f"[分析任务] 开始分析文件: {file_path}")
+            
             # 发送初始进度
             progress_queue.put(('progress', 0, 100, '开始分析...'))
             
@@ -407,10 +496,20 @@ def analyze_voc():
                     print(f"[进度更新] {message} ({current}/{total})")
                     progress_queue.put(('progress', current, total, message))
             
-            # 分析VOC数据
-            print(f"[分析任务] 调用 analyze_file...")
             analyzer.progress_callback = progress_callback
-            analyzed_sheets = analyzer.analyze_file(file_path)
+            
+            # 分析VOC数据
+            if use_celldata:
+                # 从celldata分析
+                print(f"[分析任务] 调用 celldata_to_dataframe...")
+                df = celldata_to_dataframe(celldata)
+                print(f"[分析任务] 调用 analyze_dataframe...")
+                analyzed_sheets = analyzer.analyze_dataframe(df)
+            else:
+                # 从文件分析
+                print(f"[分析任务] 调用 analyze_file...")
+                analyzed_sheets = analyzer.analyze_file(file_path)
+            
             print(f"[分析任务] 分析完成，得到 {len(analyzed_sheets) if analyzed_sheets else 0} 个sheet")
             
             if stop_flag.is_set():
