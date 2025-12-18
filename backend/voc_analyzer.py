@@ -546,7 +546,7 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
             for opinion in opinions:
                 row_idx = current_row
 
-                # 问题总标题（只在组首生成，之后依赖合并）
+                # 问题总标题 & 问题归类 & 用户情绪（只在组首生成，之后依赖合并）
                 if row_idx == start_row:
                     celldata.append({
                         'r': row_idx,
@@ -574,23 +574,24 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
                         }
                     })
 
-                # 用户情绪
-                font_color = '#000000'
-                if '负面' in str(opinion['sentiment']):
-                    font_color = '#FF0000'
-                elif '正面' in str(opinion['sentiment']):
-                    font_color = '#008000'
+                    font_color = '#000000'
+                    if '负面' in str(opinion['sentiment']):
+                        font_color = '#FF0000'
+                    elif '正面' in str(opinion['sentiment']):
+                        font_color = '#008000'
 
-                celldata.append({
-                    'r': row_idx,
-                    'c': 2,
-                    'v': {
-                        'v': opinion['sentiment'],
-                        'm': opinion['sentiment'],
-                        'ct': {'fa': 'General', 't': 'g'},
-                        'fc': font_color
-                    }
-                })
+                    celldata.append({
+                        'r': row_idx,
+                        'c': 2,
+                        'v': {
+                            'v': opinion['sentiment'],
+                            'm': opinion['sentiment'],
+                            'ct': {'fa': 'General', 't': 'g'},
+                            'fc': font_color,
+                            'vt': 1,
+                            'ht': 1
+                        }
+                    })
 
                 # 原始列数据（从列3开始）
                 for col_i, col_name in enumerate(original_columns):
@@ -613,20 +614,15 @@ Taxonomy (标准化分类体系 - 请仅从以下列表中选择):
 
                 current_row += 1
 
-            # 生成合并配置（将同组的“问题总标题”和“问题归类”列合并）
+            # 生成合并配置（将同组的“问题总标题”“问题归类”“用户情绪”列合并）
             if group_rows > 1:
-                config['merge'][f"{start_row}_0"] = {
-                    "r": start_row,
-                    "c": 0,
-                    "rs": group_rows,
-                    "cs": 1
-                }
-                config['merge'][f"{start_row}_1"] = {
-                    "r": start_row,
-                    "c": 1,
-                    "rs": group_rows,
-                    "cs": 1
-                }
+                for col_idx in (0, 1, 2):
+                    config['merge'][f"{start_row}_{col_idx}"] = {
+                        "r": start_row,
+                        "c": col_idx,
+                        "rs": group_rows,
+                        "cs": 1
+                    }
 
         # 列宽配置
         column_len = {

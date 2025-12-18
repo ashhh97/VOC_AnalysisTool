@@ -161,6 +161,10 @@ def recalculate_stats():
         groups = {}
         total_real_rows = len(rows_data)
         
+        # 为保持类别聚合顺序，记录首次出现的类别与分组顺序
+        category_order = []
+        group_order = []
+
         for row_idx, row in rows_data.items():
             summary = row.get(0, '未分类') or '未分类'
             category = row.get(1, '未归类') or '未归类'
@@ -173,6 +177,9 @@ def recalculate_stats():
             
             key = (summary, category, sentiment)
             if key not in groups:
+                if category not in category_order:
+                    category_order.append(category)
+                group_order.append(key)
                 groups[key] = {
                     'summary': summary,
                     'category': category,
@@ -183,21 +190,22 @@ def recalculate_stats():
             groups[key]['user_count'] += 1
             groups[key]['data_rows'].append(row_extra_data)
         
-        # 计算百分比并排序
+        # 计算百分比并按“类别 -> 首次出现顺序”排列
         result_list = []
-        for key, group in groups.items():
-            user_pct = (group['user_count'] / total_real_rows * 100) if total_real_rows > 0 else 0
-            result_list.append({
-                'summary': group['summary'],
-                'category': group['category'],
-                'sentiment': group['sentiment'],
-                'user_count': group['user_count'],
-                'user_pct': f"{user_pct:.2f}%",
-                'data_rows': group['data_rows']
-            })
-        
-        # 按用户数量降序排序
-        result_list.sort(key=lambda x: x['user_count'], reverse=True)
+        # 按类别顺序组织
+        for cat in category_order:
+            cat_groups = [k for k in group_order if k[1] == cat]
+            for key in cat_groups:
+                group = groups[key]
+                user_pct = (group['user_count'] / total_real_rows * 100) if total_real_rows > 0 else 0
+                result_list.append({
+                    'summary': group['summary'],
+                    'category': group['category'],
+                    'sentiment': group['sentiment'],
+                    'user_count': group['user_count'],
+                    'user_pct': f"{user_pct:.2f}%",
+                    'data_rows': group['data_rows']
+                })
         
         # 构建新的celldata（带统计列）
         new_celldata = []
